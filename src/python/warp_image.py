@@ -5,8 +5,27 @@ from typing import List, Tuple
 
 
 def warp_image(
-    src_img: np.ndarray, map: List[Tuple[Tuple[float, float], Tuple[float, float]]]
+    src_img: np.ndarray,
+    map: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+    dst_rect: Tuple[int, int, int, int] | None = None,
+    interpolation=cv2.INTER_LINEAR,
+    borderMode=cv2.BORDER_CONSTANT,
+    borderValue=(0, 0, 0),
 ) -> np.ndarray:
+    # map の最後の要素から画像サイズを取得
+    MAP_H = int(max(p[1] for p, _ in map)) + 1
+    MAP_W = int(max(p[0] for p, _ in map)) + 1
+    if abs(src_img.shape[0] - MAP_H) > 1.0:
+        print(
+            f"Warning: Source image height {src_img.shape[0]} "
+            f"does not match map height {MAP_H}."
+        )
+    if abs(src_img.shape[1] - MAP_W) > 1.0:
+        print(
+            f"Warning: Source image width {src_img.shape[1]} "
+            f"does not match map width {MAP_W}."
+        )
+
     H, W = src_img.shape[:2]
     map_x = np.array([[p[0] for p, _ in map]], dtype=np.float32).reshape(H, W)
     map_y = np.array([[p[1] for p, _ in map]], dtype=np.float32).reshape(H, W)
@@ -15,10 +34,56 @@ def warp_image(
         src_img,
         map_x,
         map_y,
-        interpolation=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(0, 0, 0),
+        interpolation=interpolation,
+        borderMode=borderMode,
+        borderValue=borderValue,
     )
+
+    if dst_rect is not None:
+        x, y, w, h = dst_rect
+        warped_img = warped_img[y : y + h, x : x + w]
+
+    return warped_img
+
+
+def inverse_warp_image(
+    src_img: np.ndarray,
+    map: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+    dst_rect: Tuple[int, int, int, int] | None = None,
+    interpolation=cv2.INTER_LINEAR,
+    borderMode=cv2.BORDER_CONSTANT,
+    borderValue=(0, 0, 0),
+) -> np.ndarray:
+    # map の最後の要素から画像サイズを取得
+    MAP_H = int(max(p[1] for _, p in map)) + 1
+    MAP_W = int(max(p[0] for _, p in map)) + 1
+    if abs(src_img.shape[0] - MAP_H) > 1.0:
+        print(
+            f"Warning: Source image height {src_img.shape[0]} "
+            f"does not match map height {MAP_H}."
+        )
+    if abs(src_img.shape[1] - MAP_W) > 1.0:
+        print(
+            f"Warning: Source image width {src_img.shape[1]} "
+            f"does not match map width {MAP_W}."
+        )
+
+    H, W = src_img.shape[:2]
+    map_x = np.array([[p[0] for _, p in map]], dtype=np.float32).reshape(H, W)
+    map_y = np.array([[p[1] for _, p in map]], dtype=np.float32).reshape(H, W)
+
+    warped_img = cv2.remap(
+        src_img,
+        map_x,
+        map_y,
+        interpolation=interpolation,
+        borderMode=borderMode,
+        borderValue=borderValue,
+    )
+
+    if dst_rect is not None:
+        x, y, w, h = dst_rect
+        warped_img = warped_img[y : y + h, x : x + w]
 
     return warped_img
 
