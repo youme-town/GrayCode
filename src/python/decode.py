@@ -82,7 +82,7 @@ def main(argv: list[str] | None = None) -> None:
     print("camera image size :", white.shape)
     print()
 
-    viz_c2p = np.zeros((cam_height, cam_width, 3), np.uint8)
+    viz_c2p = np.zeros((cam_height, cam_width, 3), np.uint16)
 
     # 差分画像をNumPyで一括計算して「候補ピクセル」のマスクを作成
     diff = white.astype(np.int16) - black.astype(np.int16)
@@ -104,7 +104,12 @@ def main(argv: list[str] | None = None) -> None:
                 step * (proj_pix[0] + 0.5),
                 step * (proj_pix[1] + 0.5),
             )
-            viz_c2p[y, x, :] = [fixed_pix[0], fixed_pix[1], 128]
+            # uint16で色情報を格納
+            viz_c2p[y, x, :] = [
+                np.uint16(round(fixed_pix[0])),
+                np.uint16(round(fixed_pix[1])),
+                np.uint16(np.iinfo(viz_c2p.dtype).max / 2),
+            ]
             c2p_list.append(((x, y), fixed_pix))
 
     print("=== Result ===")
