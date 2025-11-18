@@ -22,7 +22,7 @@ def load_c2p_numpy(
     return map_list
 
 
-def interpolate_c2p(
+def interpolate_c2plist(
     cam_height: int,
     cam_width: int,
     c2p_list: List[Tuple[Tuple[float, float], Tuple[float, float]]],
@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if len(argv) != 4:
         print(
-            "Usage : python compensate_c2p.py <c2p_numpy_filename> <cam_height> <cam_width>"
+            "Usage : python interpolate_c2p.py <c2p_numpy_filename> <cam_height> <cam_width>"
         )
         print()
         return
@@ -91,15 +91,22 @@ def main(argv: list[str] | None = None) -> None:
     except ValueError:
         print("cam_height, cam_width は整数で指定してください。")
         print(
-            "Usage : python compensate_c2p.py <c2p_numpy_filename> <cam_height> <cam_width>"
+            "Usage : python interpolate_c2p.py <c2p_numpy_filename> <cam_height> <cam_width>"
         )
         print()
         return
-    c2p_list = load_c2p_numpy(c2p_numpy_filename)
+
+    c2p_list: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+    try:
+        c2p_list = load_c2p_numpy(c2p_numpy_filename)
+    except Exception as e:
+        print(f"Error loading c2p numpy file: {e}")
+        return
+
     print(
         f"Loaded {len(c2p_list)} camera-to-projector correspondences from '{c2p_numpy_filename}'"
     )
-    c2p_list_interp = interpolate_c2p(cam_height, cam_width, c2p_list)
+    c2p_list_interp = interpolate_c2plist(cam_height, cam_width, c2p_list)
 
     out_filename = os.path.splitext(c2p_numpy_filename)[0] + "_compensated.npy"
     np.save(out_filename, np.array(c2p_list_interp, dtype=object))

@@ -11,10 +11,10 @@ import numpy as np
 
 
 TARGETDIR = Path("data/graycode_pattern")
-CAPTUREDDIR = Path("./captured")
+CAPTUREDDIR = Path("data/captured")
 
-BLACKTHR = 5
-WHITETHR = 40
+BLACKTHR = 50
+WHITETHR = 5
 
 
 def print_usage() -> None:
@@ -46,8 +46,8 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     try:
-        proj_width = int(argv[1])
-        proj_height = int(argv[2])
+        proj_height = int(argv[1])
+        proj_width = int(argv[2])
         step = int(argv[3]) if len(argv) == 4 else 1
     except ValueError:
         print("height, width, step は整数で指定してください。")
@@ -82,7 +82,7 @@ def main(argv: list[str] | None = None) -> None:
     print("camera image size :", white.shape)
     print()
 
-    viz_c2p = np.zeros((cam_height, cam_width, 3), np.uint16)
+    viz_c2p = np.zeros((cam_height, cam_width, 3), np.uint8)
 
     # 差分画像をNumPyで一括計算して「候補ピクセル」のマスクを作成
     diff = white.astype(np.int16) - black.astype(np.int16)
@@ -90,6 +90,9 @@ def main(argv: list[str] | None = None) -> None:
 
     # 有効画素のインデックスをまとめて取得
     ys, xs = np.where(valid_mask)
+
+    # valid maskを保存
+    cv2.imwrite("valid_mask.png", (valid_mask * 255).astype(np.uint8))
 
     c2p_list: List[Tuple[Tuple[int, int], Tuple[float, float]]] = []
 
@@ -104,11 +107,11 @@ def main(argv: list[str] | None = None) -> None:
                 step * (proj_pix[0] + 0.5),
                 step * (proj_pix[1] + 0.5),
             )
-            # uint16で色情報を格納
+
             viz_c2p[y, x, :] = [
-                np.uint16(round(fixed_pix[0])),
-                np.uint16(round(fixed_pix[1])),
-                np.uint16(np.iinfo(viz_c2p.dtype).max / 2),
+                fixed_pix[0] % np.iinfo(viz_c2p.dtype).max,
+                fixed_pix[1] % np.iinfo(viz_c2p.dtype).max,
+                np.iinfo(viz_c2p.dtype).max // 2,
             ]
             c2p_list.append(((x, y), fixed_pix))
 
