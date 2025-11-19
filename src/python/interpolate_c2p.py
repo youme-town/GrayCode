@@ -1,31 +1,47 @@
+# coding: utf-8
+
 import os
 import sys
 from pathlib import Path
 from typing import List, Tuple
 import numpy as np
-from scipy.interpolate import Rbf
+from scipy.interpolate import Rbf, griddata
 
 
 def load_c2p_numpy(
     map_file_path: str,
 ) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
     map_data = np.load(map_file_path, allow_pickle=True)
-    map_list: List[Tuple[Tuple[float, float], Tuple[float, float]]] = map_data.tolist()
+    map_list_raw = map_data.tolist()
 
-    if not isinstance(map_list, list):
+    if not isinstance(map_list_raw, list):
         raise TypeError("map_list must be a list")
 
-    for i, item in enumerate(map_list[:10]):  # 先頭だけ
-        if not (isinstance(item, tuple) and len(item) == 2):
-            raise TypeError(f"map_list[{i}] must be ((x,y),(u,v))")
+    for i, item in enumerate(map_list_raw[:10]):  # 先頭だけチェック
+        if (
+            not isinstance(item, (list, tuple))
+            or len(item) != 2
+            or not isinstance(item[0], (list, tuple))
+            or len(item[0]) != 2
+            or not isinstance(item[1], (list, tuple))
+            or len(item[1]) != 2
+        ):
+            raise TypeError(f"map_list[{i}] must be [[x,y],[u,v]]")
+
+    # [[x,y],[u,v]] → ((x,y),(u,v)) に変換
+    map_list: List[Tuple[Tuple[float, float], Tuple[float, float]]] = [
+        ((float(item[0][0]), float(item[0][1])), (float(item[1][0]), float(item[1][1])))
+        for item in map_list_raw
+    ]
 
     return map_list
 
 
-def interpolate_c2plist(
+def interpolate_c2p_list(
     cam_height: int,
     cam_width: int,
     c2p_list: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+    interp_method: str = "cubic",
 ) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
     known_cam_x = np.array([cam[0] for cam, _ in c2p_list], dtype=np.float32)
     known_cam_y = np.array([cam[1] for cam, _ in c2p_list], dtype=np.float32)
@@ -35,26 +51,26 @@ def interpolate_c2plist(
     if (max(known_cam_x) > cam_width - 1) or (max(known_cam_y) > cam_height - 1):
         print("Warning: Some known camera coordinates are out of bounds.")
 
-    # call RBF interpolation
-    rbf_proj_x = Rbf(
-        known_cam_x, known_cam_y, known_proj_x, function="thin_plate", smooth=0
-    )
-    rbf_proj_y = Rbf(
-        known_cam_x, known_cam_y, known_proj_y, function="thin_plate", smooth=0
-    )
-
     # Create a grid of camera coordinates
     grid_cam_x, grid_cam_y = np.meshgrid(
         np.arange(cam_width, dtype=np.float32),
         np.arange(cam_height, dtype=np.float32),
         indexing="xy",
     )
-    grid_proj_x = rbf_proj_x(grid_cam_x.ravel(), grid_cam_y.ravel()).reshape(
-        cam_height, cam_width
+
+    grid_proj_x = griddata(
+        points=(known_cam_x, known_cam_y),
+        values=known_proj_x,
+        xi=(grid_cam_x, grid_cam_y),
+        method=interp_method,
     )
-    grid_proj_y = rbf_proj_y(grid_cam_x.ravel(), grid_cam_y.ravel()).reshape(
-        cam_height, cam_width
+    grid_proj_y = griddata(
+        points=(known_cam_x, known_cam_y),
+        values=known_proj_y,
+        xi=(grid_cam_x, grid_cam_y),
+        method=interp_method,
     )
+
     grid_proj_x = grid_proj_x.astype(np.float32)
     grid_proj_y = grid_proj_y.astype(np.float32)
 
@@ -66,8 +82,14 @@ def interpolate_c2plist(
 
     c2p_array = np.concatenate([cam_coords, proj_coords], axis=1)  # shape: (N, 4)
 
+    # c2p_array: shape (N, 4), dtype float32 想定
+    cam_coords = c2p_array[:, :2]  # (N, 2)
+    proj_coords = c2p_array[:, 2:]  # (N, 2)
+
+    # Python の list[ ((cx, cy), (px, py)), ... ] が欲しければ
     ret_c2p_list = [
-        ((float(cx), float(cy)), (float(px), float(py))) for cx, cy, px, py in c2p_array
+        ((float(cx), float(cy)), (float(px), float(py)))
+        for (cx, cy), (px, py) in zip(cam_coords, proj_coords)
     ]
 
     return ret_c2p_list
@@ -106,7 +128,7 @@ def main(argv: list[str] | None = None) -> None:
     print(
         f"Loaded {len(c2p_list)} camera-to-projector correspondences from '{c2p_numpy_filename}'"
     )
-    c2p_list_interp = interpolate_c2plist(cam_height, cam_width, c2p_list)
+    c2p_list_interp = interpolate_c2p_list(cam_height, cam_width, c2p_list)
 
     out_filename = os.path.splitext(c2p_numpy_filename)[0] + "_compensated.npy"
     np.save(out_filename, np.array(c2p_list_interp, dtype=object))
@@ -119,5 +141,6 @@ def main(argv: list[str] | None = None) -> None:
     print("output : './result_c2p_compensated.csv'")
     print()
 
-    if __name__ == "__main__":
-        main()
+
+if __name__ == "__main__":
+    main()
