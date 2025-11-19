@@ -109,8 +109,8 @@ def main(argv: list[str] | None = None) -> None:
             )
 
             viz_c2p[y, x, :] = [
-                fixed_pix[0] % np.iinfo(viz_c2p.dtype).max,
-                fixed_pix[1] % np.iinfo(viz_c2p.dtype).max,
+                fixed_pix[0] % (np.iinfo(viz_c2p.dtype).max + 1),
+                fixed_pix[1] % (np.iinfo(viz_c2p.dtype).max + 1),
                 np.iinfo(viz_c2p.dtype).max // 2,
             ]
             c2p_list.append(((x, y), fixed_pix))

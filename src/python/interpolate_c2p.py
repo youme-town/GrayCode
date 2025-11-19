@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Tuple
 import numpy as np
 from scipy.interpolate import Rbf, griddata
+import cv2
 
 
 def load_c2p_numpy(
@@ -95,6 +96,58 @@ def interpolate_c2p_list(
     return ret_c2p_list
 
 
+def create_vis_image(
+    cam_height: int,
+    cam_width: int,
+    c2p_list_interp: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+    dtype: np.dtype = np.dtype(np.uint8),
+) -> np.ndarray:
+    # list → ndarray: shape (N, 4)
+    arr = np.array(
+        [
+            [cam_x, cam_y, proj_x, proj_y]
+            for (cam_x, cam_y), (proj_x, proj_y) in c2p_list_interp
+        ],
+        dtype=np.float32,
+    )
+
+    cam_x = arr[:, 0]
+    cam_y = arr[:, 1]
+    proj_x = arr[:, 2]
+    proj_y = arr[:, 3]
+
+    ix = np.rint(cam_x).astype(np.int32)  # round
+    iy = np.rint(cam_y).astype(np.int32)
+
+    # 有効な点だけをマスク
+    valid = (
+        (0 <= ix)
+        & (ix < cam_width)
+        & (0 <= iy)
+        & (iy < cam_height)
+        & ~np.isnan(proj_x)
+        & ~np.isnan(proj_y)
+    )
+
+    ix_v = ix[valid]
+    iy_v = iy[valid]
+    proj_x_v = proj_x[valid]
+    proj_y_v = proj_y[valid]
+
+    vis_image = np.zeros((cam_height, cam_width, 3), dtype=dtype)
+
+    # 色をベクトル化して計算
+    r = (proj_x_v).astype(np.int32) % (np.iinfo(dtype).max + 1)
+    g = (proj_y_v).astype(np.int32) % (np.iinfo(dtype).max + 1)
+    b = 128 * np.ones_like(r, dtype=np.int32)
+
+    vis_image[iy_v, ix_v, 0] = r.astype(dtype)
+    vis_image[iy_v, ix_v, 1] = g.astype(dtype)
+    vis_image[iy_v, ix_v, 2] = b.astype(dtype)
+
+    return vis_image
+
+
 def main(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv
@@ -129,6 +182,14 @@ def main(argv: list[str] | None = None) -> None:
         f"Loaded {len(c2p_list)} camera-to-projector correspondences from '{c2p_numpy_filename}'"
     )
     c2p_list_interp = interpolate_c2p_list(cam_height, cam_width, c2p_list)
+
+    # create image for visualization
+    vis_image = create_vis_image(
+        cam_height, cam_width, c2p_list_interp, dtype=np.dtype(np.uint8)
+    )
+    vis_filename = os.path.splitext(c2p_numpy_filename)[0] + "_compensated_vis.png"
+    cv2.imwrite(vis_filename, vis_image)
+    print(f"Saved visualization image to '{vis_filename}'")
 
     out_filename = os.path.splitext(c2p_numpy_filename)[0] + "_compensated.npy"
     np.save(out_filename, np.array(c2p_list_interp, dtype=object))
