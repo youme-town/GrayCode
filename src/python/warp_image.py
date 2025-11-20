@@ -113,6 +113,10 @@ class PixelMapWarper:
         if aggregation == AggregationMethod.MEAN:
             # 平均を取るために加算とカウント
             for (src_x, src_y), (dst_x, dst_y) in self.pixel_map:
+                # NaN値をスキップ
+                if np.isnan(src_x) or np.isnan(src_y) or np.isnan(dst_x) or np.isnan(dst_y):
+                    continue
+
                 # 元画像の座標を計算
                 img_x = int(src_x) - src_offset[0]
                 img_y = int(src_y) - src_offset[1]
@@ -149,6 +153,10 @@ class PixelMapWarper:
                 dst_img.fill(np.inf)
 
             for (src_x, src_y), (dst_x, dst_y) in self.pixel_map:
+                # NaN値をスキップ
+                if np.isnan(src_x) or np.isnan(src_y) or np.isnan(dst_x) or np.isnan(dst_y):
+                    continue
+
                 img_x = int(src_x) - src_offset[0]
                 img_y = int(src_y) - src_offset[1]
 
@@ -194,6 +202,10 @@ class PixelMapWarper:
                 ]
 
             for (src_x, src_y), (dst_x, dst_y) in self.pixel_map:
+                # NaN値をスキップ
+                if np.isnan(src_x) or np.isnan(src_y) or np.isnan(dst_x) or np.isnan(dst_y):
+                    continue
+
                 img_x = int(src_x) - src_offset[0]
                 img_y = int(src_y) - src_offset[1]
 
@@ -225,6 +237,10 @@ class PixelMapWarper:
         elif aggregation in [AggregationMethod.FIRST, AggregationMethod.LAST]:
             # 最初または最後の値
             for (src_x, src_y), (dst_x, dst_y) in self.pixel_map:
+                # NaN値をスキップ
+                if np.isnan(src_x) or np.isnan(src_y) or np.isnan(dst_x) or np.isnan(dst_y):
+                    continue
+
                 img_x = int(src_x) - src_offset[0]
                 img_y = int(src_y) - src_offset[1]
 
@@ -302,6 +318,10 @@ class PixelMapWarper:
         # pixel_mapの要素を入れ替える: ((u,v), (x,y)) として扱う
         map_dict = {}
         for (src_x, src_y), (dst_x, dst_y) in self.pixel_map:
+            # NaN値をスキップ
+            if np.isnan(src_x) or np.isnan(src_y) or np.isnan(dst_x) or np.isnan(dst_y):
+                continue
+
             # 逆変換なので、dst -> src へのマッピングを作成
             map_key = (int(round(src_x)), int(round(src_y)))
             map_dict[map_key] = (dst_x, dst_y)
