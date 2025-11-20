@@ -113,7 +113,11 @@ def main(argv: list[str] | None = None) -> None:
     map_list: List[Tuple[Tuple[float, float], Tuple[float, float]]] = map_data.tolist()
 
     # 画像のワープ
-    warped_img = warp_image(src_img, map_list)
+    warped_img = inverse_warp_image(
+        src_img,
+        map_list,
+        dst_rect=(1920 // 2 - 500 // 2, 1080 // 2 - 500 // 2, 500, 500),
+    )
 
     # 出力画像の保存
     cv2.imwrite(output_image_path, warped_img)
