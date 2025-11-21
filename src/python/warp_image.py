@@ -114,7 +114,12 @@ class PixelMapWarper:
             # 平均を取るために加算とカウント
             for (src_x, src_y), (dst_x, dst_y) in self.pixel_map:
                 # NaN値をスキップ
-                if np.isnan(src_x) or np.isnan(src_y) or np.isnan(dst_x) or np.isnan(dst_y):
+                if (
+                    np.isnan(src_x)
+                    or np.isnan(src_y)
+                    or np.isnan(dst_x)
+                    or np.isnan(dst_y)
+                ):
                     continue
 
                 # 元画像の座標を計算
@@ -154,7 +159,12 @@ class PixelMapWarper:
 
             for (src_x, src_y), (dst_x, dst_y) in self.pixel_map:
                 # NaN値をスキップ
-                if np.isnan(src_x) or np.isnan(src_y) or np.isnan(dst_x) or np.isnan(dst_y):
+                if (
+                    np.isnan(src_x)
+                    or np.isnan(src_y)
+                    or np.isnan(dst_x)
+                    or np.isnan(dst_y)
+                ):
                     continue
 
                 img_x = int(src_x) - src_offset[0]
@@ -203,7 +213,12 @@ class PixelMapWarper:
 
             for (src_x, src_y), (dst_x, dst_y) in self.pixel_map:
                 # NaN値をスキップ
-                if np.isnan(src_x) or np.isnan(src_y) or np.isnan(dst_x) or np.isnan(dst_y):
+                if (
+                    np.isnan(src_x)
+                    or np.isnan(src_y)
+                    or np.isnan(dst_x)
+                    or np.isnan(dst_y)
+                ):
                     continue
 
                 img_x = int(src_x) - src_offset[0]
@@ -238,7 +253,12 @@ class PixelMapWarper:
             # 最初または最後の値
             for (src_x, src_y), (dst_x, dst_y) in self.pixel_map:
                 # NaN値をスキップ
-                if np.isnan(src_x) or np.isnan(src_y) or np.isnan(dst_x) or np.isnan(dst_y):
+                if (
+                    np.isnan(src_x)
+                    or np.isnan(src_y)
+                    or np.isnan(dst_x)
+                    or np.isnan(dst_y)
+                ):
                     continue
 
                 img_x = int(src_x) - src_offset[0]
@@ -400,130 +420,15 @@ class PixelMapWarper:
         return inpainted.astype(np.float64)
 
 
-def warp_image(
-    src_img: np.ndarray,
-    map: List[Tuple[Tuple[float, float], Tuple[float, float]]],
-    dst_rect: Tuple[int, int, int, int] | None = None,
-    interpolation=cv2.INTER_LINEAR,
-    borderMode=cv2.BORDER_CONSTANT,
-    borderValue=(0, 0, 0),
-) -> np.ndarray:
-    """
-    順変換: (x,y) -> (u,v) のマッピングで画像を変換（後方互換性のためのラッパー関数）
-
-    この関数は従来のcv2.remapベースの実装を使用します。
-    より柔軟な機能が必要な場合は PixelMapWarper クラスを直接使用してください。
-
-    Args:
-        src_img: 入力画像
-        map: 画素対応マップ ((x,y), (u,v)) のリスト
-        dst_rect: トリミング矩形 (x, y, width, height)
-        interpolation: 補間方法
-        borderMode: 境界モード
-        borderValue: 境界値
-
-    Returns:
-        変換後の画像
-    """
-    # map の最後の要素から画像サイズを取得
-    MAP_H = int(max(p[1] for p, _ in map)) + 1
-    MAP_W = int(max(p[0] for p, _ in map)) + 1
-    if abs(src_img.shape[0] - MAP_H) > 1.0:
-        print(
-            f"Warning: Source image height {src_img.shape[0]} "
-            f"does not match map height {MAP_H}."
-        )
-    if abs(src_img.shape[1] - MAP_W) > 1.0:
-        print(
-            f"Warning: Source image width {src_img.shape[1]} "
-            f"does not match map width {MAP_W}."
-        )
-
-    H, W = src_img.shape[:2]
-    map_x = np.array([[p[0] for p, _ in map]], dtype=np.float32).reshape(H, W)
-    map_y = np.array([[p[1] for p, _ in map]], dtype=np.float32).reshape(H, W)
-
-    warped_img = cv2.remap(
-        src_img,
-        map_x,
-        map_y,
-        interpolation=interpolation,
-        borderMode=borderMode,
-        borderValue=borderValue,
-    )
-
-    if dst_rect is not None:
-        x, y, w, h = dst_rect
-        warped_img = warped_img[y : y + h, x : x + w]
-
-    return warped_img
-
-
-def inverse_warp_image(
-    src_img: np.ndarray,
-    map: List[Tuple[Tuple[float, float], Tuple[float, float]]],
-    dst_rect: Tuple[int, int, int, int] | None = None,
-    interpolation=cv2.INTER_LINEAR,
-    borderMode=cv2.BORDER_CONSTANT,
-    borderValue=(0, 0, 0),
-) -> np.ndarray:
-    """
-    逆変換: (u,v) -> (x,y) のマッピングで画像を変換（後方互換性のためのラッパー関数）
-
-    この関数は従来のcv2.remapベースの実装を使用します。
-    より柔軟な機能が必要な場合は PixelMapWarper クラスを直接使用してください。
-
-    Args:
-        src_img: 入力画像
-        map: 画素対応マップ ((x,y), (u,v)) のリスト（逆変換時は(u,v)->xへのマップとして扱う）
-        dst_rect: トリミング矩形 (x, y, width, height)
-        interpolation: 補間方法
-        borderMode: 境界モード
-        borderValue: 境界値
-
-    Returns:
-        変換後の画像
-    """
-    # mapの後ろのタプルの最大値から画像サイズを取得
-    MAP_H = int(max(p[1] for _, p in map)) + 1
-    MAP_W = int(max(p[0] for _, p in map)) + 1
-    if abs(src_img.shape[0] - MAP_H) > 1.0:
-        print(
-            f"Warning: Source image height {src_img.shape[0]} "
-            f"does not match map height {MAP_H}."
-        )
-    if abs(src_img.shape[1] - MAP_W) > 1.0:
-        print(
-            f"Warning: Source image width {src_img.shape[1]} "
-            f"does not match map width {MAP_W}."
-        )
-
-    H, W = src_img.shape[:2]
-    map_x = np.array([[p[0] for _, p in map]], dtype=np.float32).reshape(H, W)
-    map_y = np.array([[p[1] for _, p in map]], dtype=np.float32).reshape(H, W)
-
-    warped_img = cv2.remap(
-        src_img,
-        map_x,
-        map_y,
-        interpolation=interpolation,
-        borderMode=borderMode,
-        borderValue=borderValue,
-    )
-
-    if dst_rect is not None:
-        x, y, w, h = dst_rect
-        warped_img = warped_img[y : y + h, x : x + w]
-
-    return warped_img
-
-
 def main() -> None:
     # マップデータの読み込み
     pixel_map = load_c2p_numpy("result_c2p_compensated.npy")
 
     # 画像の読み込み
     src_img = cv2.imread("captured_rgb_img_3.png")
+    if src_img is None:
+        print("Error: failed to load image 'captured_rgb_img_3.png'")
+        return
 
     # Warperの作成
     warper = PixelMapWarper(pixel_map)
@@ -539,7 +444,7 @@ def main() -> None:
         aggregation=AggregationMethod.MEAN,  # 平均を使用
         inpaint=InpaintMethod.TELEA,  # 穴埋め補完を使用
         inpaint_radius=5,  # 補完半径
-        crop_rect=(OFFSET_X, OFFSET_Y, 500, 500),  # トリミング
+        #        crop_rect=(OFFSET_X, OFFSET_Y, 500, 500),  # トリミング
     )
 
     # 逆変換（backward warping）- cv2.remapを使用
