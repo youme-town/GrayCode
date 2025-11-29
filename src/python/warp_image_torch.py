@@ -15,8 +15,6 @@ Usage:
     >>> # Backward warp: UV image -> XY image
     >>> xy_img = warper.backward_warp(uv_img, dst_size=(100, 100))
 
-Author: Your Name
-License: MIT
 """
 
 import torch
@@ -263,7 +261,10 @@ class PixelMapWarperTorch:
             cx, cy, cw, ch = crop_rect
             out_img = out_img[:, :, cy : cy + ch, cx : cx + cw]
 
-        return out_img if is_batch else out_img.squeeze(0)
+        # CPU へ転送
+        out_img_cpu = out_img.cpu()
+
+        return out_img_cpu if is_batch else out_img_cpu.squeeze(0)
 
     def backward_warp(
         self,
@@ -431,14 +432,18 @@ class PixelMapWarperTorch:
             out_img = out_img.squeeze(0)
             valid_mask_after = valid_mask_after.squeeze(0)
 
+        # CPU へ転送
+        out_img_cpu = out_img.cpu()
+        valid_mask_after_cpu = valid_mask_after.cpu()
+
         if return_mask:
             mask_out = (
-                valid_mask_after.squeeze(1)
-                if valid_mask_after.shape[1] == 1
-                else valid_mask_after
+                valid_mask_after_cpu.squeeze(1)
+                if valid_mask_after_cpu.shape[1] == 1
+                else valid_mask_after_cpu
             )
-            return out_img, mask_out
-        return out_img
+            return out_img_cpu, mask_out
+        return out_img_cpu
 
     def _apply_inpaint_conv(
         self,
