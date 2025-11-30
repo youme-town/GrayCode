@@ -5,8 +5,8 @@ A GPU-accelerated image warping module using pixel correspondence maps.
 Supports both forward warping (splatting) and backward warping (sampling).
 
 Coordinate Systems:
-    - XY: Source coordinate system (pixel_map's src points)
-    - UV: Destination coordinate system (pixel_map's dst points)
+    - XY (Camera/Source): Integer coordinates (0,0), (1,0), etc. represent pixel centers
+    - UV (Projector/Destination): Pixel centers are at (0.5, 0.5), (1.5, 0.5), etc.
 
 Usage:
     >>> warper = PixelMapWarperTorch(pixel_map, device="cuda")
@@ -61,6 +61,12 @@ class PixelMapWarperTorch:
 
     The pixel map defines correspondences from XY coordinate system to UV coordinate system:
         (x, y) -> (u, v)
+
+    Coordinate System Conventions:
+        - XY (Camera): (0, 0) is the center of pixel (0, 0)
+                       Pixel (i, j) covers the range [i-0.5, i+0.5) x [j-0.5, j+0.5)
+        - UV (Projector): (0.5, 0.5) is the center of pixel (0, 0)
+                          Pixel (i, j) covers the range [i, i+1) x [j, j+1)
 
     Forward warp transforms an XY image to UV space (splatting).
     Backward warp transforms a UV image to XY space (sampling).
@@ -136,6 +142,36 @@ class PixelMapWarperTorch:
             u.max().item(),
             v.max().item(),
         )
+
+    def _xy_to_pixel(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Convert XY (camera) coordinate to pixel index.
+
+        XY coordinate system: (0, 0) is the center of pixel (0, 0).
+        Pixel (i, j) covers [i-0.5, i+0.5) x [j-0.5, j+0.5).
+
+        Args:
+            x: XY coordinates (float tensor)
+
+        Returns:
+            Pixel indices (long tensor)
+        """
+        return torch.floor(x + 0.5).long()
+
+    def _uv_to_pixel(self, u: torch.Tensor) -> torch.Tensor:
+        """
+        Convert UV (projector) coordinate to pixel index.
+
+        UV coordinate system: (0.5, 0.5) is the center of pixel (0, 0).
+        Pixel (i, j) covers [i, i+1) x [j, j+1).
+
+        Args:
+            u: UV coordinates (float tensor)
+
+        Returns:
+            Pixel indices (long tensor)
+        """
+        return torch.floor(u).long()
 
     def forward_warp(
         self,
@@ -240,25 +276,28 @@ class PixelMapWarperTorch:
         """
         B, C, H, W = src_img.shape
 
-        # Calculate source coordinates (integer)
-        src_x = torch.floor(self.map_tensor[:, 0]).long() - src_offset[0]
-        src_y = torch.floor(self.map_tensor[:, 1]).long() - src_offset[1]
+        # Calculate source pixel indices (XY coordinate: 0,0 is pixel center)
+        src_x = self._xy_to_pixel(self.map_tensor[:, 0]) - src_offset[0]
+        src_y = self._xy_to_pixel(self.map_tensor[:, 1]) - src_offset[1]
 
-        # Destination coordinates (float for bilinear weights)
+        # Destination coordinates (UV: 0.5,0.5 is pixel center)
+        # For bilinear splatting, we need continuous coordinates
         dst_x_f = self.map_tensor[:, 2]
         dst_y_f = self.map_tensor[:, 3]
 
-        # Calculate 4 neighbor coordinates
+        # Calculate 4 neighbor pixel indices
+        # UV convention: pixel (i,j) covers [i, i+1), center at (i+0.5, j+0.5)
         x0 = torch.floor(dst_x_f).long()
         y0 = torch.floor(dst_y_f).long()
         x1 = x0 + 1
         y1 = y0 + 1
 
         # Calculate bilinear weights
-        wx1 = dst_x_f - x0.float()  # Weight for right
-        wy1 = dst_y_f - y0.float()  # Weight for bottom
-        wx0 = 1.0 - wx1  # Weight for left
-        wy0 = 1.0 - wy1  # Weight for top
+        # Weight is based on distance from pixel center
+        wx1 = dst_x_f - x0.float()  # Weight for right neighbor
+        wy1 = dst_y_f - y0.float()  # Weight for bottom neighbor
+        wx0 = 1.0 - wx1  # Weight for left neighbor
+        wy0 = 1.0 - wy1  # Weight for top neighbor
 
         # Weights for 4 neighbors
         w00 = wx0 * wy0  # Top-left
@@ -383,11 +422,13 @@ class PixelMapWarperTorch:
         """
         B, C, H, W = src_img.shape
 
-        # Calculate coordinates
-        src_x = torch.floor(self.map_tensor[:, 0]).long() - src_offset[0]
-        src_y = torch.floor(self.map_tensor[:, 1]).long() - src_offset[1]
-        dst_x = torch.floor(self.map_tensor[:, 2]).long()
-        dst_y = torch.floor(self.map_tensor[:, 3]).long()
+        # Calculate source pixel indices (XY: 0,0 is pixel center)
+        src_x = self._xy_to_pixel(self.map_tensor[:, 0]) - src_offset[0]
+        src_y = self._xy_to_pixel(self.map_tensor[:, 1]) - src_offset[1]
+
+        # Calculate destination pixel indices (UV: 0.5,0.5 is pixel center)
+        dst_x = self._uv_to_pixel(self.map_tensor[:, 2])
+        dst_y = self._uv_to_pixel(self.map_tensor[:, 3])
 
         # Filter valid coordinates
         valid_mask = (
@@ -526,8 +567,10 @@ class PixelMapWarperTorch:
 
         # Build sampling grid
         x_coords, y_coords, u_coords, v_coords = self.map_tensor.T
-        x_int = torch.floor(x_coords).long() - xy_offset_x
-        y_int = torch.floor(y_coords).long() - xy_offset_y
+
+        # Convert XY coordinates to pixel indices (XY: 0,0 is pixel center)
+        x_int = self._xy_to_pixel(x_coords) - xy_offset_x
+        y_int = self._xy_to_pixel(y_coords) - xy_offset_y
 
         # Filter valid coordinates
         valid = (x_int >= 0) & (x_int < dst_w) & (y_int >= 0) & (y_int < dst_h)
@@ -592,7 +635,9 @@ class PixelMapWarperTorch:
         else:
             valid_mask_after = valid_mask
 
-        # Convert to pixel coordinates
+        # Convert UV coordinates to sampling coordinates
+        # UV coordinate system: (0.5, 0.5) is center of pixel (0, 0)
+        # Adjust for UV offset
         sample_x = grid_uv[:, 0:1, :, :] - uv_offset_x
         sample_y = grid_uv[:, 1:2, :, :] - uv_offset_y
 
@@ -608,19 +653,24 @@ class PixelMapWarperTorch:
             in_bounds, sample_y, torch.full_like(sample_y, INVALID_COORD)
         )
 
-        # Normalize to [-1, 1]
-        norm_x = 2.0 * sample_x / max(W_uv - 1, 1) - 1.0
-        norm_y = 2.0 * sample_y / max(H_uv - 1, 1) - 1.0
+        # Normalize to [-1, 1] for grid_sample
+        # Using align_corners=False: norm=-1 maps to left edge (pixel -0.5)
+        #                            norm=+1 maps to right edge (pixel W-0.5)
+        # For UV coordinates where (0.5, 0.5) is pixel center:
+        #   pixel_center = 0.5 should map to norm = 2*0.5/W - 1 = 1/W - 1
+        # This means: norm = 2 * sample_x / W - 1
+        norm_x = 2.0 * sample_x / max(W_uv, 1) - 1.0
+        norm_y = 2.0 * sample_y / max(H_uv, 1) - 1.0
         grid = torch.cat([norm_x, norm_y], dim=1).permute(0, 2, 3, 1)
         grid_batch = grid.expand(B, -1, -1, -1)
 
-        # Sample
+        # Sample using align_corners=False for UV coordinate convention
         out_img = F.grid_sample(
             uv_img,
             grid_batch,
             mode=mode,
             padding_mode=padding_mode.value,
-            align_corners=True,
+            align_corners=False,
         )
 
         # Apply mask for ZEROS mode
@@ -762,13 +812,18 @@ def main():
     src_img_tensor = torch.from_numpy(src_img_np).permute(2, 0, 1)
 
     # Create map: scale + translation
-    # src(x, y) -> dst(x * 1.8 + 20, y * 1.8 + 20)
+    # XY coordinate (x, y) where (0,0) is pixel center
+    # -> UV coordinate (u, v) where (0.5, 0.5) is pixel center
+    # src pixel (x, y) -> dst pixel at approximately (x * 1.8 + 20, y * 1.8 + 20)
     scale = 1.8
-    map_list = [
-        ((x, y), (x * scale + 20, y * scale + 20))
-        for y in range(src_h)
-        for x in range(src_w)
-    ]
+    map_list = []
+    for y in range(src_h):
+        for x in range(src_w):
+            # XY: integer coordinates are pixel centers
+            xy = (float(x), float(y))
+            # UV: pixel center is at (pixel_idx + 0.5)
+            uv = (x * scale + 20 + 0.5, y * scale + 20 + 0.5)
+            map_list.append((xy, uv))
 
     # Initialize warper
     warper = PixelMapWarperTorch(map_list, device=device)

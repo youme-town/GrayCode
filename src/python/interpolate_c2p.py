@@ -38,86 +38,113 @@ def load_c2p_numpy(
     return map_list
 
 
+from scipy import sparse
+from scipy.sparse.linalg import spsolve
+
+
 def interpolate_c2p_list(
     cam_height: int,
     cam_width: int,
     c2p_list: List[Tuple[Tuple[float, float], Tuple[float, float]]],
-    method: str = "telea",  # "telea" or "ns" (Navier-Stokes)
 ) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
     """
-    Fill missing correspondences using image inpainting.
-    Suitable when most pixels already have correspondences.
+    Fill missing correspondences using direct Laplacian solve.
+    Much faster than iterative method.
     """
     # Initialize maps with NaN
-    proj_x_map = np.full((cam_height, cam_width), np.nan, dtype=np.float32)
-    proj_y_map = np.full((cam_height, cam_width), np.nan, dtype=np.float32)
+    proj_x_map = np.full((cam_height, cam_width), np.nan, dtype=np.float64)
+    proj_y_map = np.full((cam_height, cam_width), np.nan, dtype=np.float64)
 
     # Fill known correspondences
     for (cam_x, cam_y), (proj_x, proj_y) in c2p_list:
-        ix, iy = int(round(cam_x)), int(round(cam_y))
+        ix, iy = int(cam_x), int(cam_y)
         if 0 <= ix < cam_width and 0 <= iy < cam_height:
             proj_x_map[iy, ix] = proj_x
             proj_y_map[iy, ix] = proj_y
 
-    # Create mask for unknown pixels
-    mask = np.isnan(proj_x_map) | np.isnan(proj_y_map)
-    mask_uint8 = (mask.astype(np.uint8)) * 255
+    # Solve for each channel
+    proj_x_filled = _laplacian_fill(proj_x_map)
+    proj_y_filled = _laplacian_fill(proj_y_map)
 
-    # For inpainting, we need valid values everywhere first
-    # Temporarily fill NaN with 0 (will be overwritten by inpainting)
-    proj_x_map_filled = np.nan_to_num(proj_x_map, nan=0.0)
-    proj_y_map_filled = np.nan_to_num(proj_y_map, nan=0.0)
-
-    # Normalize to 0-1 range for better inpainting
-    px_min, px_max = np.nanmin(proj_x_map), np.nanmax(proj_x_map)
-    py_min, py_max = np.nanmin(proj_y_map), np.nanmax(proj_y_map)
-
-    proj_x_norm = (proj_x_map_filled - px_min) / (px_max - px_min + 1e-8)
-    proj_y_norm = (proj_y_map_filled - py_min) / (py_max - py_min + 1e-8)
-
-    # Convert to uint16 for higher precision inpainting
-    proj_x_uint16 = (proj_x_norm * 65535).astype(np.uint16)
-    proj_y_uint16 = (proj_y_norm * 65535).astype(np.uint16)
-
-    # Inpainting
-    inpaint_flag = cv2.INPAINT_TELEA if method == "telea" else cv2.INPAINT_NS
-    inpaint_radius = 5
-
-    proj_x_inpainted = cv2.inpaint(
-        proj_x_uint16, mask_uint8, inpaint_radius, inpaint_flag
-    )
-    proj_y_inpainted = cv2.inpaint(
-        proj_y_uint16, mask_uint8, inpaint_radius, inpaint_flag
-    )
-
-    # Convert back to original scale
-    grid_proj_x = (proj_x_inpainted.astype(np.float32) / 65535) * (
-        px_max - px_min
-    ) + px_min
-    grid_proj_y = (proj_y_inpainted.astype(np.float32) / 65535) * (
-        py_max - py_min
-    ) + py_min
-
-    # Restore original known values exactly (avoid any floating point errors)
-    grid_proj_x[~mask] = proj_x_map[~mask]
-    grid_proj_y[~mask] = proj_y_map[~mask]
-
-    # Convert to list format
-    grid_cam_x, grid_cam_y = np.meshgrid(
-        np.arange(cam_width, dtype=np.float32),
-        np.arange(cam_height, dtype=np.float32),
-        indexing="xy",
-    )
-
-    cam_coords = np.stack([grid_cam_x, grid_cam_y], axis=-1).reshape(-1, 2)
-    proj_coords = np.stack([grid_proj_x, grid_proj_y], axis=-1).reshape(-1, 2)
-
-    ret_c2p_list = [
-        ((float(cx), float(cy)), (float(px), float(py)))
-        for (cx, cy), (px, py) in zip(cam_coords, proj_coords)
-    ]
+    # Build output
+    ret_c2p_list: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+    for iy in range(cam_height):
+        for ix in range(cam_width):
+            ret_c2p_list.append(
+                (
+                    (float(ix), float(iy)),
+                    (float(proj_x_filled[iy, ix]), float(proj_y_filled[iy, ix])),
+                )
+            )
 
     return ret_c2p_list
+
+
+def _laplacian_fill(data: np.ndarray) -> np.ndarray:
+    """
+    Fill NaN regions by solving Laplace equation.
+    Known pixels act as Dirichlet boundary conditions.
+    """
+    h, w = data.shape
+    n_pixels = h * w
+
+    mask = np.isnan(data)
+    if not np.any(mask):
+        return data.copy()
+
+    known_mask = ~mask
+
+    # Pixel index mapping
+    def idx(y, x):
+        return y * w + x
+
+    # Build sparse Laplacian matrix
+    row, col, val = [], [], []
+    rhs = np.zeros(n_pixels, dtype=np.float64)
+
+    for iy in range(h):
+        for ix in range(w):
+            i = idx(iy, ix)
+
+            if known_mask[iy, ix]:
+                # Known pixel: identity equation
+                row.append(i)
+                col.append(i)
+                val.append(1.0)
+                rhs[i] = data[iy, ix]
+            else:
+                # Unknown pixel: Laplacian equation
+                # sum of neighbors = 4 * center (or fewer at boundaries)
+                neighbors = []
+                if iy > 0:
+                    neighbors.append((iy - 1, ix))
+                if iy < h - 1:
+                    neighbors.append((iy + 1, ix))
+                if ix > 0:
+                    neighbors.append((iy, ix - 1))
+                if ix < w - 1:
+                    neighbors.append((iy, ix + 1))
+
+                n_neighbors = len(neighbors)
+                row.append(i)
+                col.append(i)
+                val.append(float(n_neighbors))
+
+                for ny, nx in neighbors:
+                    row.append(i)
+                    col.append(idx(ny, nx))
+                    val.append(-1.0)
+
+                rhs[i] = 0.0
+
+    A = sparse.csr_matrix((val, (row, col)), shape=(n_pixels, n_pixels))
+    solution = spsolve(A, rhs)
+
+    result = solution.reshape(h, w)
+    # Ensure known values are exactly preserved
+    result[known_mask] = data[known_mask]
+
+    return result
 
 
 def create_vis_image(
