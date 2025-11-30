@@ -42,52 +42,76 @@ def interpolate_c2p_list(
     cam_height: int,
     cam_width: int,
     c2p_list: List[Tuple[Tuple[float, float], Tuple[float, float]]],
-    interp_method: str = "cubic",
+    method: str = "telea",  # "telea" or "ns" (Navier-Stokes)
 ) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
-    known_cam_x = np.array([cam[0] for cam, _ in c2p_list], dtype=np.float32)
-    known_cam_y = np.array([cam[1] for cam, _ in c2p_list], dtype=np.float32)
-    known_proj_x = np.array([proj[0] for _, proj in c2p_list], dtype=np.float32)
-    known_proj_y = np.array([proj[1] for _, proj in c2p_list], dtype=np.float32)
+    """
+    Fill missing correspondences using image inpainting.
+    Suitable when most pixels already have correspondences.
+    """
+    # Initialize maps with NaN
+    proj_x_map = np.full((cam_height, cam_width), np.nan, dtype=np.float32)
+    proj_y_map = np.full((cam_height, cam_width), np.nan, dtype=np.float32)
 
-    if (max(known_cam_x) > cam_width - 1) or (max(known_cam_y) > cam_height - 1):
-        print("Warning: Some known camera coordinates are out of bounds.")
+    # Fill known correspondences
+    for (cam_x, cam_y), (proj_x, proj_y) in c2p_list:
+        ix, iy = int(round(cam_x)), int(round(cam_y))
+        if 0 <= ix < cam_width and 0 <= iy < cam_height:
+            proj_x_map[iy, ix] = proj_x
+            proj_y_map[iy, ix] = proj_y
 
-    # Create a grid of camera coordinates
+    # Create mask for unknown pixels
+    mask = np.isnan(proj_x_map) | np.isnan(proj_y_map)
+    mask_uint8 = (mask.astype(np.uint8)) * 255
+
+    # For inpainting, we need valid values everywhere first
+    # Temporarily fill NaN with 0 (will be overwritten by inpainting)
+    proj_x_map_filled = np.nan_to_num(proj_x_map, nan=0.0)
+    proj_y_map_filled = np.nan_to_num(proj_y_map, nan=0.0)
+
+    # Normalize to 0-1 range for better inpainting
+    px_min, px_max = np.nanmin(proj_x_map), np.nanmax(proj_x_map)
+    py_min, py_max = np.nanmin(proj_y_map), np.nanmax(proj_y_map)
+
+    proj_x_norm = (proj_x_map_filled - px_min) / (px_max - px_min + 1e-8)
+    proj_y_norm = (proj_y_map_filled - py_min) / (py_max - py_min + 1e-8)
+
+    # Convert to uint16 for higher precision inpainting
+    proj_x_uint16 = (proj_x_norm * 65535).astype(np.uint16)
+    proj_y_uint16 = (proj_y_norm * 65535).astype(np.uint16)
+
+    # Inpainting
+    inpaint_flag = cv2.INPAINT_TELEA if method == "telea" else cv2.INPAINT_NS
+    inpaint_radius = 5
+
+    proj_x_inpainted = cv2.inpaint(
+        proj_x_uint16, mask_uint8, inpaint_radius, inpaint_flag
+    )
+    proj_y_inpainted = cv2.inpaint(
+        proj_y_uint16, mask_uint8, inpaint_radius, inpaint_flag
+    )
+
+    # Convert back to original scale
+    grid_proj_x = (proj_x_inpainted.astype(np.float32) / 65535) * (
+        px_max - px_min
+    ) + px_min
+    grid_proj_y = (proj_y_inpainted.astype(np.float32) / 65535) * (
+        py_max - py_min
+    ) + py_min
+
+    # Restore original known values exactly (avoid any floating point errors)
+    grid_proj_x[~mask] = proj_x_map[~mask]
+    grid_proj_y[~mask] = proj_y_map[~mask]
+
+    # Convert to list format
     grid_cam_x, grid_cam_y = np.meshgrid(
         np.arange(cam_width, dtype=np.float32),
         np.arange(cam_height, dtype=np.float32),
         indexing="xy",
     )
 
-    grid_proj_x = griddata(
-        points=(known_cam_x, known_cam_y),
-        values=known_proj_x,
-        xi=(grid_cam_x, grid_cam_y),
-        method=interp_method,
-    )
-    grid_proj_y = griddata(
-        points=(known_cam_x, known_cam_y),
-        values=known_proj_y,
-        xi=(grid_cam_x, grid_cam_y),
-        method=interp_method,
-    )
-
-    grid_proj_x = grid_proj_x.astype(np.float32)
-    grid_proj_y = grid_proj_y.astype(np.float32)
-
-    ret_c2p_list: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
-
-    # Collect interpolated correspondences
     cam_coords = np.stack([grid_cam_x, grid_cam_y], axis=-1).reshape(-1, 2)
     proj_coords = np.stack([grid_proj_x, grid_proj_y], axis=-1).reshape(-1, 2)
 
-    c2p_array = np.concatenate([cam_coords, proj_coords], axis=1)  # shape: (N, 4)
-
-    # c2p_array: shape (N, 4), dtype float32 想定
-    cam_coords = c2p_array[:, :2]  # (N, 2)
-    proj_coords = c2p_array[:, 2:]  # (N, 2)
-
-    # Python の list[ ((cx, cy), (px, py)), ... ] が欲しければ
     ret_c2p_list = [
         ((float(cx), float(cy)), (float(px), float(py)))
         for (cx, cy), (px, py) in zip(cam_coords, proj_coords)
