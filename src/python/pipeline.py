@@ -1,0 +1,144 @@
+from __future__ import annotations
+
+import sys
+from dataclasses import dataclass
+
+from . import gen_graycode
+from . import cap_graycode
+from . import decode
+from . import interpolate_c2p
+from . import warp_image_torch  # まだ自動では呼ばないが import だけしておく
+
+
+@dataclass
+class GraycodePipelineConfig:
+    """グレイコード一連処理の設定"""
+
+    # プロジェクタの解像度
+    proj_height: int
+    proj_width: int
+
+    # GrayCode のブロックサイズ（gen_graycode / decode で共通利用）
+    width_step: int = 1
+    height_step: int = 1
+
+    # プロジェクタウィンドウを出す位置
+    window_pos_x: int = 0
+    window_pos_y: int = 0
+
+    # 将来の拡張用オプション
+    run_capture: bool = True
+    run_decode: bool = True
+    run_interpolate: bool = True
+    # run_warp: bool = False  # warp_image まで自動で回したくなったら使う
+
+
+def run_graycode_pipeline(cfg: GraycodePipelineConfig) -> None:
+    """
+    グレイコードの
+        1. パターン生成
+        2. 投影＆撮影
+        3. デコード
+        4. 対応点補間
+    までを順番に実行する高レベルパイプライン関数。
+    """
+
+    # 1. GrayCode パターン生成
+    gen_argv = [
+        "gen_graycode.py",
+        str(cfg.proj_height),
+        str(cfg.proj_width),
+        str(cfg.height_step),
+        str(cfg.width_step),
+    ]
+    print("[1/4] Generating graycode patterns...")
+    gen_graycode.main(gen_argv)
+
+    # 2. 投影＆撮影
+    if cfg.run_capture:
+        cap_argv = [
+            "cap_graycode.py",
+            str(cfg.window_pos_x),
+            str(cfg.window_pos_y),
+        ]
+        print("[2/4] Capturing projected patterns...")
+        cap_graycode.main(cap_argv)
+    else:
+        print("[2/4] Skipped capture (run_capture=False)")
+
+    # 3. デコード（result_c2p.npy / .csv を生成）
+    if cfg.run_decode:
+        dec_argv = [
+            "decode.py",
+            str(cfg.proj_height),
+            str(cfg.proj_width),
+            str(cfg.height_step),
+            str(cfg.width_step),
+        ]
+        print("[3/4] Decoding captured images...")
+        decode.main(dec_argv)
+    else:
+        print("[3/4] Skipped decode (run_decode=False)")
+
+    # 4. 対応点補間（result_c2p_compensated.npy / .csv を生成）
+    if cfg.run_interpolate:
+        # decode.py が出力する既定ファイル名をそのまま使う
+        interp_argv = [
+            "interpolate_c2p.py",
+            "result_c2p.npy",
+            str(cfg.proj_height),
+            str(cfg.proj_width),
+        ]
+        print("[4/4] Interpolating c2p correspondences...")
+        interpolate_c2p.main(interp_argv)
+    else:
+        print("[4/4] Skipped interpolate (run_interpolate=False)")
+
+    print("Graycode pipeline finished.")
+
+
+def main(argv: list[str] | None = None) -> None:
+    """
+    CLI エントリポイント。
+    例:
+        python -m src.python.pipeline 1080 1920 1 1920 0
+    """
+    if argv is None:
+        argv = sys.argv
+
+    if not (3 <= len(argv) <= 6):
+        print(
+            "Usage: python -m src.python.pipeline "
+            "<proj_height> <proj_width> [height_step] [width_step] [window_pos_x] [window_pos_y]"
+        )
+        print(
+            "  height_step, width_step, window_pos_x, window_pos_y は省略時 1, 1, 0, 0 として扱います。"
+        )
+        return
+
+    try:
+        proj_height = int(argv[1])
+        proj_width = int(argv[2])
+        height_step = int(argv[3]) if len(argv) >= 4 else 1
+        width_step = int(argv[4]) if len(argv) >= 5 else 1
+        window_pos_x = int(argv[5]) if len(argv) >= 6 else 0
+        window_pos_y = int(argv[6]) if len(argv) >= 7 else 0
+    except ValueError:
+        print(
+            "proj_height, proj_width, height_step, width_step, window_pos_x, window_pos_y は整数で指定してください。"
+        )
+        return
+
+    cfg = GraycodePipelineConfig(
+        proj_height=proj_height,
+        proj_width=proj_width,
+        height_step=height_step,
+        width_step=width_step,
+        window_pos_x=window_pos_x,
+        window_pos_y=window_pos_y,
+    )
+    run_graycode_pipeline(cfg)
+
+
+if __name__ == "__main__":
+    main()

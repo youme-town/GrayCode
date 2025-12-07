@@ -13,10 +13,12 @@ TARGETDIR = Path("data/graycode_pattern")
 CAPTUREDDIR = Path("./captured")
 
 
-def generate_expanded_patterns(height: int, width: int, step: int) -> List[np.ndarray]:
+def generate_expanded_patterns(
+    height: int, width: int, height_step: int, width_step: int
+) -> List[np.ndarray]:
     """GrayCodeパターンを生成し、指定サイズに拡大した画像配列を返す。"""
-    gc_height = (height - 1) // step + 1
-    gc_width = (width - 1) // step + 1
+    gc_height = (height - 1) // height_step + 1
+    gc_width = (width - 1) // width_step + 1
 
     graycode = structured_light.GrayCodePattern.create(gc_width, gc_height)
     _, patterns = graycode.generate()
@@ -49,7 +51,7 @@ def print_usage() -> None:
     print(
         "Usage : python gen_graycode.py "
         "<projector image height> <projector image width> "
-        "[graycode step(default=1)]"
+        "[graycode width_step(default=1)] [graycode height_step(default=1)]"
     )
     print()
 
@@ -58,20 +60,21 @@ def main(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv
 
-    if len(argv) not in (3, 4):
+    if len(argv) not in (3, 5):
         print_usage()
         return
 
     try:
         height = int(argv[1])
         width = int(argv[2])
-        step = int(argv[3]) if len(argv) == 4 else 1
+        width_step = int(argv[3]) if len(argv) == 5 else 1
+        height_step = int(argv[4]) if len(argv) == 5 else 1
     except ValueError:
-        print("height, width, step は整数で指定してください。")
+        print("height, width, width_step, height_step は整数で指定してください。")
         print_usage()
         return
 
-    patterns = generate_expanded_patterns(height, width, step)
+    patterns = generate_expanded_patterns(width, height, width_step, height_step)
     save_patterns(patterns, TARGETDIR)
 
     print("=== Result ===")
