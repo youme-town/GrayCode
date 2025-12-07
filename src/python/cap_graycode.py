@@ -47,12 +47,15 @@ def main(argv: list[str] | None = None) -> None:
         print("height, width は整数で指定してください。")
         print_usage()
         return
-
+    cam_height = 0
+    cam_width = 0
     graycode_imgs: List[np.ndarray] = []
     # グレイコードをファイルから参照
     for idx, fname in enumerate(sorted(glob.glob(str(TARGETDIR / "pattern_*.png")))):
         print(f"Loading pattern image: {fname}")
         pat_img = cv2.imread(fname, cv2.IMREAD_GRAYSCALE)
+        if cam_height == 0 and cam_width == 0:
+            cam_height, cam_width = pat_img.shape
         graycode_imgs.append(pat_img)
 
     cv2.namedWindow("Pattern", cv2.WINDOW_NORMAL)

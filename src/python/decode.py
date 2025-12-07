@@ -37,7 +37,7 @@ def load_images(pattern: str) -> List[np.ndarray]:
     return [cv2.imread(f, cv2.IMREAD_GRAYSCALE) for f in filenames]
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> tuple[int, int] | None:
     if argv is None:
         argv = sys.argv
 
@@ -131,6 +131,7 @@ def main(argv: list[str] | None = None) -> None:
     print("NumPy array : './result_c2p.npy'")
     print("output : './result_c2p.csv'")
     print()
+    return (cam_height, cam_width)
 
 
 if __name__ == "__main__":

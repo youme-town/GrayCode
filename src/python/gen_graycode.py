@@ -27,9 +27,9 @@ def generate_expanded_patterns(
     for pat in patterns:
         img = np.zeros((height, width), np.uint8)
         for y in range(height):
-            src_y = y // step
+            src_y = y // height_step
             for x in range(width):
-                src_x = x // step
+                src_x = x // width_step
                 img[y, x] = pat[src_y, src_x]
         expanded.append(img)
 

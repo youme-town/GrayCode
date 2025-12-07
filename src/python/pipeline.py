@@ -67,6 +67,8 @@ def run_graycode_pipeline(cfg: GraycodePipelineConfig) -> None:
         print("[2/4] Skipped capture (run_capture=False)")
 
     # 3. デコード（result_c2p.npy / .csv を生成）
+    cam_height = 0
+    cam_width = 0
     if cfg.run_decode:
         dec_argv = [
             "decode.py",
@@ -76,23 +78,25 @@ def run_graycode_pipeline(cfg: GraycodePipelineConfig) -> None:
             str(cfg.width_step),
         ]
         print("[3/4] Decoding captured images...")
-        decode.main(dec_argv)
+        cam_size = decode.main(dec_argv)
+        if cam_size is not None:
+            cam_height, cam_width = cam_size
     else:
         print("[3/4] Skipped decode (run_decode=False)")
 
     # 4. 対応点補間（result_c2p_compensated.npy / .csv を生成）
-    if cfg.run_interpolate:
+    if cfg.run_interpolate and cam_height > 0 and cam_width > 0:
         # decode.py が出力する既定ファイル名をそのまま使う
         interp_argv = [
             "interpolate_c2p.py",
             "result_c2p.npy",
-            str(cfg.proj_height),
-            str(cfg.proj_width),
+            str(cam_height),
+            str(cam_width),
         ]
         print("[4/4] Interpolating c2p correspondences...")
         interpolate_c2p.main(interp_argv)
     else:
-        print("[4/4] Skipped interpolate (run_interpolate=False)")
+        print("[4/4] Skipped interpolate (run_interpolate=False or invalid cam size)")
 
     print("Graycode pipeline finished.")
 
