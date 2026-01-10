@@ -5,7 +5,6 @@ import sys
 
 import cv2
 import numpy as np
-from scipy.sparse.linalg import LinearOperator, cg
 
 
 def load_c2p_numpy(
@@ -97,12 +96,11 @@ def interpolate_c2p_array(
     c2p_list: np.ndarray,
 ) -> np.ndarray:
     """
-    Fill missing correspondences using Laplacian interpolation.
-    Matrix-free iterative solve (CG) to reduce memory usage.
+    Fill missing correspondences using cv2.inpaint (float32).
     """
     # Initialize maps with NaN
-    proj_x_map = np.full((cam_height, cam_width), np.nan, dtype=np.float64)
-    proj_y_map = np.full((cam_height, cam_width), np.nan, dtype=np.float64)
+    proj_x_map = np.full((cam_height, cam_width), np.nan, dtype=np.float32)
+    proj_y_map = np.full((cam_height, cam_width), np.nan, dtype=np.float32)
 
     # Fill known correspondences (vectorized)
     if not (
@@ -130,12 +128,16 @@ def interpolate_c2p_array(
 
     ix_v = ix[valid]
     iy_v = iy[valid]
-    proj_x_map[iy_v, ix_v] = proj_x[valid].astype(np.float64, copy=False)
-    proj_y_map[iy_v, ix_v] = proj_y[valid].astype(np.float64, copy=False)
+    proj_x_map[iy_v, ix_v] = proj_x[valid].astype(np.float32, copy=False)
+    proj_y_map[iy_v, ix_v] = proj_y[valid].astype(np.float32, copy=False)
 
     # Solve for each channel
-    proj_x_filled = _laplacian_fill(proj_x_map)
-    proj_y_filled = _laplacian_fill(proj_y_map)
+    proj_x_filled = _inpaint_fill_float32(
+        proj_x_map, radius=3.0, method=cv2.INPAINT_TELEA
+    )
+    proj_y_filled = _inpaint_fill_float32(
+        proj_y_map, radius=3.0, method=cv2.INPAINT_TELEA
+    )
 
     # Build output as (N,4) float32 to avoid huge Python object overhead
     out = np.empty((cam_height * cam_width, 4), dtype=np.float32)
@@ -172,67 +174,36 @@ def interpolate_c2p_list(
     ]
 
 
-def _laplacian_fill(data: np.ndarray) -> np.ndarray:
-    """
-    Fill NaN regions by solving Laplace equation.
-    Known pixels act as Dirichlet boundary conditions.
-    """
-    h, w = data.shape
-    n_pixels = h * w
+def _inpaint_fill_float32(
+    data: np.ndarray,
+    radius: float,
+    method: int,
+) -> np.ndarray:
+    """NaN を穴として cv2.inpaint で埋める（1ch float32）。
 
-    mask = np.isnan(data)
+    OpenCV(4.11.0) では 32-bit float 1ch がサポートされるため、uint8 量子化は行わない。
+    """
+
+    if data.ndim != 2:
+        raise TypeError("data must be a 2D array")
+
+    src = data.astype(np.float32, copy=True)
+    mask = np.isnan(src)
     if not np.any(mask):
-        return data.copy()
+        return src
 
-    known_mask = ~mask
-    known_flat = known_mask.ravel()
+    # inpaintのマスクは 0/255 の uint8
+    mask_u8 = mask.astype(np.uint8) * 255
 
-    # RHS (known: value, unknown: 0)
-    rhs = np.zeros(n_pixels, dtype=np.float64)
-    rhs[known_flat] = data.ravel()[known_flat]
+    # NaNは仮に0で埋めておく（maskで穴扱いになる）
+    src[mask] = 0.0
 
-    # Initial guess
-    x0 = np.zeros(n_pixels, dtype=np.float64)
-    x0[known_flat] = rhs[known_flat]
+    # float32 のまま inpaint
+    dst = cv2.inpaint(src, mask_u8, float(radius), int(method))
 
-    # Degree (number of 4-neighbors): 2/3/4
-    deg = np.full((h, w), 4.0, dtype=np.float32)
-    deg[0, :] -= 1.0
-    deg[-1, :] -= 1.0
-    deg[:, 0] -= 1.0
-    deg[:, -1] -= 1.0
-
-    class _DirichletLaplacian(LinearOperator):
-        def __init__(self, known: np.ndarray, degree: np.ndarray):
-            self._known = known
-            self._deg = degree.astype(np.float64, copy=False)
-            self._h, self._w = known.shape
-            n = self._h * self._w
-
-            # SciPy のバージョン/スタブ差分に備えて両方試す
-            try:
-                super().__init__(dtype=np.float64, shape=(n, n))
-            except TypeError:
-                super().__init__((n, n), np.float64)
-
-        def _matvec(self, x: np.ndarray) -> np.ndarray:
-            x2 = x.reshape(self._h, self._w)
-            y = self._deg * x2
-            y[:-1, :] -= x2[1:, :]
-            y[1:, :] -= x2[:-1, :]
-            y[:, :-1] -= x2[:, 1:]
-            y[:, 1:] -= x2[:, :-1]
-            y[self._known] = x2[self._known]
-            return y.ravel()
-
-    Aop = _DirichletLaplacian(known_mask, deg)
-    sol, info = cg(Aop, rhs, x0=x0, rtol=1e-6, atol=0.0, maxiter=2000)
-    if info != 0:
-        print(f"[warn] Laplacian CG did not fully converge (info={info}).")
-
-    result = sol.reshape(h, w)
-    result[known_mask] = data[known_mask]
-    return result
+    # 既知値は厳密に保持
+    dst[~mask] = data[~mask].astype(np.float32, copy=False)
+    return dst
 
 
 def create_vis_image(
