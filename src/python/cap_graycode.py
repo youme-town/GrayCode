@@ -87,3 +87,7 @@ def main(argv: list[str] | None = None) -> None:
         "Run 'python decode.py <projector image height> <projector image width>' to decode the captured images."
     )
     print()
+
+
+if __name__ == "__main__":
+    main()
