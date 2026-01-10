@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> None:
     """
     CLI エントリポイント。
     例:
-        python -m src.python.pipeline 1080 1920 1 1920 0
+        python -m src.python.pipeline 1080 1920 1 1 0 0
     """
     if argv is None:
         argv = sys.argv

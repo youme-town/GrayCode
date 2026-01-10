@@ -106,9 +106,13 @@ def main(argv: list[str] | None = None) -> tuple[int, int] | None:
         if not err:
             # プロジェクタ座標をステップサイズ分拡大して中心にオフセットをかける
             # これにより，得られたプロジェクタ座標（ブロック）の中心を指すようになる
+
+            # 【修正箇所】
+            # proj_pix[0] は X座標(width方向) なので width_step を掛ける
+            # proj_pix[1] は Y座標(height方向) なので height_step を掛ける
             fixed_pix = (
-                height_step * (proj_pix[0] + 0.5),
-                width_step * (proj_pix[1] + 0.5),
+                width_step * (proj_pix[0] + 0.5),
+                height_step * (proj_pix[1] + 0.5),
             )
 
             viz_c2p[y, x, :] = [

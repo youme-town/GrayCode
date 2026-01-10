@@ -1,6 +1,4 @@
 # coding: UTF-8
-
-import os
 import sys
 from pathlib import Path
 from typing import List
@@ -10,7 +8,7 @@ from cv2 import structured_light
 import numpy as np
 
 TARGETDIR = Path("data/graycode_pattern")
-CAPTUREDDIR = Path("./captured")
+CAPTUREDDIR = Path("data/captured")
 
 
 def generate_expanded_patterns(
@@ -74,7 +72,7 @@ def main(argv: list[str] | None = None) -> None:
         print_usage()
         return
 
-    patterns = generate_expanded_patterns(width, height, width_step, height_step)
+    patterns = generate_expanded_patterns(height, width, height_step, width_step)
     save_patterns(patterns, TARGETDIR)
 
     print("=== Result ===")
