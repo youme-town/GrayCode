@@ -23,6 +23,21 @@ import numpy as np
 from typing import List, Tuple, Optional, Union
 from enum import Enum
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+_EPS = 1e-8
+_LARGE_POS = 1e9
+_LARGE_NEG = -1e9
+_INVALID_COORD = -1e6
+
+
+class MapType(Enum):
+    """Type of pixel correspondence map."""
+
+    C2P = "c2p"  # Camera-to-Projector: [cam_x, cam_y, proj_x, proj_y]
+    P2C = "p2c"  # Projector-to-Camera: [proj_x, proj_y, cam_x, cam_y]
+
 
 class AggregationMethod(Enum):
     """Aggregation method when multiple pixels map to the same location."""
@@ -86,6 +101,7 @@ class PixelMapWarperTorch:
             torch.Tensor,
         ],
         device: Optional[str] = None,
+        map_type: MapType = MapType.C2P,
     ):
         """
         Initialize the warper with a pixel correspondence map.
@@ -96,6 +112,9 @@ class PixelMapWarperTorch:
                 - NumPy array: shape (N, 4) with columns [src_x, src_y, dst_x, dst_y]
                 - PyTorch tensor: shape (N, 4) with columns [src_x, src_y, dst_x, dst_y]
             device: Computation device. If None, uses CUDA if available.
+            map_type: Type of pixel correspondence map.
+                - C2P: columns are [cam_x, cam_y, proj_x, proj_y] (default)
+                - P2C: columns are [proj_x, proj_y, cam_x, cam_y]
         """
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -116,11 +135,16 @@ class PixelMapWarperTorch:
         else:
             raise TypeError(f"Unsupported pixel_map type: {type(pixel_map)}")
 
+        # P2C の場合は列を入れ替えて内部的に C2P 形式 [cam_x, cam_y, proj_x, proj_y] に統一
+        if map_type == MapType.P2C:
+            self.map_tensor = self.map_tensor[:, [2, 3, 0, 1]]
+
         # Remove NaN entries
         mask = ~torch.isnan(self.map_tensor).any(dim=1)
         self.map_tensor = self.map_tensor[mask]
 
         self._cache_bounds()
+        self._inpaint_kernels: dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
 
     def _cache_bounds(self) -> None:
         """Cache the coordinate bounds of the map."""
@@ -143,35 +167,100 @@ class PixelMapWarperTorch:
             v.max().item(),
         )
 
-    def _xy_to_pixel(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Convert XY (camera) coordinate to pixel index.
+    # ------------------------------------------------------------------
+    # Coordinate helpers
+    # ------------------------------------------------------------------
 
-        XY coordinate system: (0, 0) is the center of pixel (0, 0).
-        Pixel (i, j) covers [i-0.5, i+0.5) x [j-0.5, j+0.5).
-
-        Args:
-            x: XY coordinates (float tensor)
-
-        Returns:
-            Pixel indices (long tensor)
-        """
+    @staticmethod
+    def _xy_to_pixel(x: torch.Tensor) -> torch.Tensor:
+        """Convert XY coordinate to pixel index. (0,0) is pixel center."""
         return torch.floor(x + 0.5).long()
 
-    def _uv_to_pixel(self, u: torch.Tensor) -> torch.Tensor:
-        """
-        Convert UV (projector) coordinate to pixel index.
+    @staticmethod
+    def _uv_to_pixel(u: torch.Tensor) -> torch.Tensor:
+        """Convert UV coordinate to pixel index. (0.5,0.5) is pixel center."""
+        return torch.floor(u).long()
 
-        UV coordinate system: (0.5, 0.5) is the center of pixel (0, 0).
-        Pixel (i, j) covers [i, i+1) x [j, j+1).
+    # ------------------------------------------------------------------
+    # Aggregation helper (shared by nearest / bilinear splatting)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _scatter_aggregate(
+        out: torch.Tensor,
+        weights: torch.Tensor,
+        dst_indices: torch.Tensor,
+        values: torch.Tensor,
+        w: Optional[torch.Tensor],
+        aggregation: AggregationMethod,
+    ) -> None:
+        """
+        Accumulate *values* into *out* at *dst_indices* using *aggregation*.
+
+        For weighted splatting pass *w* (per-pixel weights); for nearest pass None.
+        *weights* is a flat (M,) tensor that tracks per-destination total weight /
+        count and is updated in-place.
 
         Args:
-            u: UV coordinates (float tensor)
-
-        Returns:
-            Pixel indices (long tensor)
+            out: (B, C, M) accumulation buffer
+            weights: (M,) weight / count buffer
+            dst_indices: (N,) destination flat indices
+            values: (B, C, N) source pixel values (already weighted if bilinear)
+            w: (N,) per-entry weights, or None for nearest (treated as 1)
+            aggregation: aggregation strategy
         """
-        return torch.floor(u).long()
+        B, C, _ = out.shape
+        idx_exp = dst_indices.unsqueeze(0).unsqueeze(0).expand(B, C, -1)
+
+        if w is None:
+            w_add = torch.ones(len(dst_indices), device=out.device)
+        else:
+            w_add = w
+
+        if aggregation == AggregationMethod.MEAN:
+            out.index_add_(2, dst_indices, values)
+            weights.index_add_(0, dst_indices, w_add)
+
+        elif aggregation == AggregationMethod.MAX:
+            out.scatter_reduce_(2, idx_exp, values, reduce="amax", include_self=True)
+            weights.index_add_(0, dst_indices, w_add)
+
+        elif aggregation == AggregationMethod.MIN:
+            out.scatter_reduce_(2, idx_exp, values, reduce="amin", include_self=True)
+            weights.index_add_(0, dst_indices, w_add)
+
+        elif aggregation == AggregationMethod.LAST:
+            out.scatter_(2, idx_exp, values)
+            weights.index_add_(0, dst_indices, w_add)
+
+    @staticmethod
+    def _finalize_aggregation(
+        out: torch.Tensor,
+        weights: torch.Tensor,
+        aggregation: AggregationMethod,
+    ) -> None:
+        """Normalize / clean up *out* after all scatter passes."""
+        if aggregation == AggregationMethod.MEAN:
+            w = weights.view(1, 1, -1)
+            mask = w > 0
+            out.copy_(torch.where(mask, out / (w + _EPS), out))
+        elif aggregation == AggregationMethod.MIN:
+            out[out == _LARGE_POS] = 0
+        elif aggregation == AggregationMethod.MAX:
+            out[out == _LARGE_NEG] = 0
+
+    @staticmethod
+    def _init_fill(aggregation: AggregationMethod) -> float:
+        """Return the initial fill value for the output buffer."""
+        if aggregation == AggregationMethod.MIN:
+            return _LARGE_POS
+        if aggregation == AggregationMethod.MAX:
+            return _LARGE_NEG
+        return 0.0
+
+    # ------------------------------------------------------------------
+    # Forward warp (splatting)
+    # ------------------------------------------------------------------
 
     def forward_warp(
         self,
@@ -184,47 +273,40 @@ class PixelMapWarperTorch:
         inpaint_iter: int = 3,
         crop_rect: Optional[Tuple[int, int, int, int]] = None,
         output_dtype: Optional[torch.dtype] = None,
+        keep_on_device: bool = False,
     ) -> torch.Tensor:
         """
         Forward warp (Splatting): XY image -> UV image.
 
-        Transforms an image from XY coordinate system to UV coordinate system
-        by "splatting" source pixels to their destination locations.
-
         Args:
             src_img: Source image in XY coordinates. Shape: (C, H, W) or (B, C, H, W)
-            dst_size: Output size as (width, height). If None, auto-calculated from map.
+            dst_size: Output size as (width, height). If None, auto-calculated.
             src_offset: Offset for source coordinates (x_offset, y_offset).
-                       Use when src_img is a crop of the full XY image.
-            splat_method: Splatting method.
-                - NEAREST: Single pixel splatting (fast but causes holes)
-                - BILINEAR: Bilinear splatting to 4 neighbors (recommended)
+            splat_method: Splatting method (NEAREST or BILINEAR).
             aggregation: Method for handling overlapping pixels.
             inpaint: Method for filling holes in the output.
             inpaint_iter: Number of inpainting iterations.
             crop_rect: Crop region (x, y, width, height) in UV space.
+            output_dtype: Desired output dtype. If None, matches input.
+            keep_on_device: If True, keep the result on the computation device.
 
         Returns:
             Warped image in UV coordinates. Shape matches input batch format.
         """
-        # Normalize to (B, C, H, W)
         is_batch = src_img.ndim == 4
         if not is_batch:
             src_img = src_img.unsqueeze(0)
 
         input_dtype = src_img.dtype
-
         B, C, H, W = src_img.shape
         src_img = src_img.to(self.device).float()
 
-        # Calculate output size
         if dst_size is None:
             dst_w = int(self.uv_bounds[2]) + 1
             dst_h = int(self.uv_bounds[3]) + 1
         else:
             dst_w, dst_h = dst_size
 
-        # Dispatch to appropriate splatting method
         if splat_method == SplatMethod.BILINEAR:
             out_img, count_img = self._forward_warp_bilinear(
                 src_img, dst_w, dst_h, src_offset, aggregation
@@ -234,22 +316,19 @@ class PixelMapWarperTorch:
                 src_img, dst_w, dst_h, src_offset, aggregation
             )
 
-        # Inpainting
         if inpaint == InpaintMethod.CONV:
             out_img = self._apply_inpaint_conv(out_img, count_img, inpaint_iter)
 
-        # Crop
         if crop_rect is not None:
             cx, cy, cw, ch = crop_rect
             out_img = out_img[:, :, cy : cy + ch, cx : cx + cw]
 
-        # Transfer to CPU & adjust dtype
-        out_img_cpu = out_img.cpu()
-
         target_dtype = output_dtype if output_dtype is not None else input_dtype
-        out_img_cpu = out_img_cpu.to(target_dtype)
+        result = out_img.to(target_dtype)
+        if not keep_on_device:
+            result = result.cpu()
 
-        return out_img_cpu if is_batch else out_img_cpu.squeeze(0)
+        return result if is_batch else result.squeeze(0)
 
     def _forward_warp_bilinear(
         self,
@@ -259,141 +338,56 @@ class PixelMapWarperTorch:
         src_offset: Tuple[int, int],
         aggregation: AggregationMethod,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Bilinear splatting: distribute each source pixel to 4 destination neighbors.
-
-        This significantly reduces holes compared to nearest-neighbor splatting.
-
-        Args:
-            src_img: Source image (B, C, H, W)
-            dst_w: Destination width
-            dst_h: Destination height
-            src_offset: Source coordinate offset
-            aggregation: Aggregation method
-
-        Returns:
-            Tuple of (output_image, count_image)
-        """
+        """Bilinear splatting: distribute each source pixel to 4 destination neighbors."""
         B, C, H, W = src_img.shape
 
-        # Calculate source pixel indices (XY coordinate: 0,0 is pixel center)
         src_x = self._xy_to_pixel(self.map_tensor[:, 0]) - src_offset[0]
         src_y = self._xy_to_pixel(self.map_tensor[:, 1]) - src_offset[1]
 
-        # Destination coordinates (UV: 0.5,0.5 is pixel center)
-        # For bilinear splatting, we need continuous coordinates
         dst_x_f = self.map_tensor[:, 2]
         dst_y_f = self.map_tensor[:, 3]
 
-        # Calculate 4 neighbor pixel indices
-        # UV convention: pixel (i,j) covers [i, i+1), center at (i+0.5, j+0.5)
+        # 4-neighbor pixel indices and bilinear weights
         x0 = torch.floor(dst_x_f).long()
         y0 = torch.floor(dst_y_f).long()
-        x1 = x0 + 1
-        y1 = y0 + 1
+        wx1 = dst_x_f - x0.float()
+        wy1 = dst_y_f - y0.float()
+        wx0 = 1.0 - wx1
+        wy0 = 1.0 - wy1
 
-        # Calculate bilinear weights
-        # Weight is based on distance from pixel center
-        wx1 = dst_x_f - x0.float()  # Weight for right neighbor
-        wy1 = dst_y_f - y0.float()  # Weight for bottom neighbor
-        wx0 = 1.0 - wx1  # Weight for left neighbor
-        wy0 = 1.0 - wy1  # Weight for top neighbor
-
-        # Weights for 4 neighbors
-        w00 = wx0 * wy0  # Top-left
-        w10 = wx1 * wy0  # Top-right
-        w01 = wx0 * wy1  # Bottom-left
-        w11 = wx1 * wy1  # Bottom-right
-
-        # Valid source coordinate mask
-        src_valid = (src_x >= 0) & (src_x < W) & (src_y >= 0) & (src_y < H)
-
-        # Create output buffers
-        out_img = torch.zeros(
-            (B, C, dst_h * dst_w), device=self.device, dtype=torch.float32
-        )
-        weight_img = torch.zeros(
-            (1, 1, dst_h * dst_w), device=self.device, dtype=torch.float32
-        )
-
-        # Process each of the 4 neighbors
         neighbors = [
-            (x0, y0, w00),
-            (x1, y0, w10),
-            (x0, y1, w01),
-            (x1, y1, w11),
+            (x0, y0, wx0 * wy0),
+            (x0 + 1, y0, wx1 * wy0),
+            (x0, y0 + 1, wx0 * wy1),
+            (x0 + 1, y0 + 1, wx1 * wy1),
         ]
 
-        for dx, dy, weights in neighbors:
-            # Valid destination coordinate mask
-            dst_valid = (dx >= 0) & (dx < dst_w) & (dy >= 0) & (dy < dst_h)
-            valid_mask = src_valid & dst_valid
+        src_valid = (src_x >= 0) & (src_x < W) & (src_y >= 0) & (src_y < H)
 
-            if not valid_mask.any():
+        M = dst_h * dst_w
+        out_img = torch.full(
+            (B, C, M), self._init_fill(aggregation),
+            device=self.device, dtype=torch.float32,
+        )
+        weight_buf = torch.zeros(M, device=self.device, dtype=torch.float32)
+
+        for dx, dy, w_nb in neighbors:
+            dst_valid = (dx >= 0) & (dx < dst_w) & (dy >= 0) & (dy < dst_h)
+            valid = src_valid & dst_valid
+            if not valid.any():
                 continue
 
-            # Extract valid coordinates and weights
-            s_x = src_x[valid_mask]
-            s_y = src_y[valid_mask]
-            d_x = dx[valid_mask]
-            d_y = dy[valid_mask]
-            w = weights[valid_mask]
+            s_x, s_y = src_x[valid], src_y[valid]
+            d_idx = dy[valid] * dst_w + dx[valid]
+            w = w_nb[valid]
+            vals = src_img[:, :, s_y, s_x] * w.view(1, 1, -1)
 
-            # Destination flat indices
-            dst_indices = d_y * dst_w + d_x
+            self._scatter_aggregate(out_img, weight_buf, d_idx, vals, w, aggregation)
 
-            # Get pixel values and apply weights
-            pixel_values = src_img[:, :, s_y, s_x]  # (B, C, N)
-            weighted_values = pixel_values * w.view(1, 1, -1)
+        self._finalize_aggregation(out_img, weight_buf, aggregation)
 
-            # Accumulate
-            if aggregation == AggregationMethod.MEAN:
-                out_img.index_add_(2, dst_indices, weighted_values)
-                weight_img.view(-1).index_add_(0, dst_indices, w)
-
-            elif aggregation == AggregationMethod.MAX:
-                # For MAX, we use scatter_reduce with weighted values
-                out_img.scatter_reduce_(
-                    2,
-                    dst_indices.unsqueeze(0).unsqueeze(0).expand(B, C, -1),
-                    weighted_values,
-                    reduce="amax",
-                    include_self=True,
-                )
-                weight_img.view(-1).index_add_(0, dst_indices, w)
-
-            elif aggregation == AggregationMethod.MIN:
-                out_img.fill_(float("inf"))
-                out_img.scatter_reduce_(
-                    2,
-                    dst_indices.unsqueeze(0).unsqueeze(0).expand(B, C, -1),
-                    weighted_values,
-                    reduce="amin",
-                    include_self=True,
-                )
-                weight_img.view(-1).index_add_(0, dst_indices, w)
-
-            elif aggregation == AggregationMethod.LAST:
-                out_img.scatter_(
-                    2,
-                    dst_indices.unsqueeze(0).unsqueeze(0).expand(B, C, -1),
-                    weighted_values,
-                )
-                weight_img.view(-1).index_add_(0, dst_indices, w)
-
-        # Normalize by total weight for MEAN aggregation
-        if aggregation == AggregationMethod.MEAN:
-            weight_mask = weight_img > 0
-            out_img = torch.where(weight_mask, out_img / (weight_img + 1e-8), out_img)
-
-        # Handle inf values from MIN aggregation
-        if aggregation == AggregationMethod.MIN:
-            out_img[out_img == float("inf")] = 0
-
-        # Reshape
         out_img = out_img.view(B, C, dst_h, dst_w)
-        count_img = (weight_img > 0).float().view(1, 1, dst_h, dst_w)
-
+        count_img = (weight_buf > 0).float().view(1, 1, dst_h, dst_w)
         return out_img, count_img
 
     def _forward_warp_nearest(
@@ -404,105 +398,42 @@ class PixelMapWarperTorch:
         src_offset: Tuple[int, int],
         aggregation: AggregationMethod,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Nearest-neighbor splatting (original implementation).
-
-        Each source pixel maps to exactly one destination pixel.
-        This is faster but causes holes when scaling up.
-
-        Args:
-            src_img: Source image (B, C, H, W)
-            dst_w: Destination width
-            dst_h: Destination height
-            src_offset: Source coordinate offset
-            aggregation: Aggregation method
-
-        Returns:
-            Tuple of (output_image, count_image)
-        """
+        """Nearest-neighbor splatting: each source pixel maps to one destination pixel."""
         B, C, H, W = src_img.shape
 
-        # Calculate source pixel indices (XY: 0,0 is pixel center)
         src_x = self._xy_to_pixel(self.map_tensor[:, 0]) - src_offset[0]
         src_y = self._xy_to_pixel(self.map_tensor[:, 1]) - src_offset[1]
-
-        # Calculate destination pixel indices (UV: 0.5,0.5 is pixel center)
         dst_x = self._uv_to_pixel(self.map_tensor[:, 2])
         dst_y = self._uv_to_pixel(self.map_tensor[:, 3])
 
-        # Filter valid coordinates
-        valid_mask = (
-            (src_x >= 0)
-            & (src_x < W)
-            & (src_y >= 0)
-            & (src_y < H)
-            & (dst_x >= 0)
-            & (dst_x < dst_w)
-            & (dst_y >= 0)
-            & (dst_y < dst_h)
+        valid = (
+            (src_x >= 0) & (src_x < W)
+            & (src_y >= 0) & (src_y < H)
+            & (dst_x >= 0) & (dst_x < dst_w)
+            & (dst_y >= 0) & (dst_y < dst_h)
         )
 
-        s_x, s_y = src_x[valid_mask], src_y[valid_mask]
-        d_x, d_y = dst_x[valid_mask], dst_y[valid_mask]
-        dst_indices = d_y * dst_w + d_x
-        pixel_values = src_img[:, :, s_y, s_x]
+        s_x, s_y = src_x[valid], src_y[valid]
+        d_idx = dst_y[valid] * dst_w + dst_x[valid]
+        vals = src_img[:, :, s_y, s_x]
 
-        # Create output buffers
-        out_img = torch.zeros(
-            (B, C, dst_h * dst_w), device=self.device, dtype=torch.float32
+        M = dst_h * dst_w
+        out_img = torch.full(
+            (B, C, M), self._init_fill(aggregation),
+            device=self.device, dtype=torch.float32,
         )
-        count_img = torch.zeros(
-            (1, 1, dst_h * dst_w), device=self.device, dtype=torch.float32
-        )
+        weight_buf = torch.zeros(M, device=self.device, dtype=torch.float32)
 
-        # Aggregate pixels
-        if aggregation == AggregationMethod.MEAN:
-            out_img.index_add_(2, dst_indices, pixel_values)
-            ones = torch.ones_like(dst_indices, dtype=torch.float32).view(1, 1, -1)
-            count_img.index_add_(2, dst_indices, ones)
-            mask = count_img > 0
-            out_img = torch.where(mask, out_img / (count_img + 1e-8), out_img)
+        self._scatter_aggregate(out_img, weight_buf, d_idx, vals, None, aggregation)
+        self._finalize_aggregation(out_img, weight_buf, aggregation)
 
-        elif aggregation == AggregationMethod.MAX:
-            out_img.fill_(-1e9)
-            out_img.scatter_reduce_(
-                2,
-                dst_indices.unsqueeze(0).unsqueeze(0).expand(B, C, -1),
-                pixel_values,
-                reduce="amax",
-                include_self=False,
-            )
-            out_img[out_img == -1e9] = 0
-            ones = torch.ones_like(dst_indices, dtype=torch.float32).view(1, 1, -1)
-            count_img.index_add_(2, dst_indices, ones)
-
-        elif aggregation == AggregationMethod.MIN:
-            out_img.fill_(1e9)
-            out_img.scatter_reduce_(
-                2,
-                dst_indices.unsqueeze(0).unsqueeze(0).expand(B, C, -1),
-                pixel_values,
-                reduce="amin",
-                include_self=False,
-            )
-            out_img[out_img == 1e9] = 0
-            ones = torch.ones_like(dst_indices, dtype=torch.float32).view(1, 1, -1)
-            count_img.index_add_(2, dst_indices, ones)
-
-        elif aggregation == AggregationMethod.LAST:
-            out_img.scatter_(
-                2,
-                dst_indices.unsqueeze(0).unsqueeze(0).expand(B, C, -1),
-                pixel_values,
-            )
-            ones = torch.ones_like(dst_indices, dtype=torch.float32).view(1, 1, -1)
-            count_img.index_add_(2, dst_indices, ones)
-
-        # Reshape
         out_img = out_img.view(B, C, dst_h, dst_w)
-        count_img = count_img.view(1, 1, dst_h, dst_w)
-
+        count_img = (weight_buf > 0).float().view(1, 1, dst_h, dst_w)
         return out_img, count_img
+
+    # ------------------------------------------------------------------
+    # Backward warp (sampling)
+    # ------------------------------------------------------------------
 
     def backward_warp(
         self,
@@ -515,78 +446,130 @@ class PixelMapWarperTorch:
         inpaint_iter: int = 5,
         return_mask: bool = False,
         output_dtype: Optional[torch.dtype] = None,
+        keep_on_device: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Backward warp (Sampling): UV image -> XY image.
 
-        Transforms an image from UV coordinate system to XY coordinate system
-        by sampling from the UV image at mapped locations.
-
         Args:
             uv_img: Source image in UV coordinates. Shape: (C, H, W) or (B, C, H, W)
             dst_size: Output size as (width, height) in XY space.
-                     If None, auto-calculated from map bounds.
             src_rect: Region in UV space that uv_img covers, as (u, v, width, height).
-                     If None, assumes uv_img starts at UV coordinate (0, 0).
             mode: Interpolation mode ('bilinear' or 'nearest').
             padding_mode: How to handle pixels with no correspondence.
             inpaint: Inpainting method for grid holes.
             inpaint_iter: Number of inpainting iterations.
             return_mask: If True, also return a mask of valid pixels.
+            output_dtype: Desired output dtype. If None, matches input.
+            keep_on_device: If True, keep the result on the computation device.
 
         Returns:
             Warped image in XY coordinates.
             If return_mask=True, returns tuple (image, mask).
         """
-        # Normalize to (B, C, H, W)
         is_batch = uv_img.ndim == 4
         if not is_batch:
             uv_img = uv_img.unsqueeze(0)
 
         input_dtype = uv_img.dtype
-
         B, C, H_uv, W_uv = uv_img.shape
         uv_img = uv_img.to(self.device).float()
 
-        # Parse src_rect
-        if src_rect is not None:
-            uv_offset_x, uv_offset_y, uv_w, uv_h = src_rect
-        else:
-            uv_offset_x, uv_offset_y = 0, 0
-            uv_w, uv_h = W_uv, H_uv
+        uv_offset_x, uv_offset_y, uv_w, uv_h = self._parse_src_rect(
+            src_rect, W_uv, H_uv
+        )
+        dst_w, dst_h, xy_offset_x, xy_offset_y = self._parse_dst_size(dst_size)
 
-        # Determine output size
+        # Build sampling grid
+        grid_uv, valid_mask = self._build_sampling_grid(
+            dst_w, dst_h, xy_offset_x, xy_offset_y,
+            uv_offset_x, uv_offset_y, uv_w, uv_h,
+            src_rect is not None,
+        )
+
+        # Inpaint grid holes
+        if inpaint != InpaintMethod.NONE and inpaint_iter > 0:
+            grid_uv, valid_mask = self._inpaint_grid(
+                grid_uv, valid_mask, inpaint_iter
+            )
+
+        # Sample from UV image
+        out_img = self._sample_from_grid(
+            uv_img, grid_uv, valid_mask,
+            uv_offset_x, uv_offset_y, W_uv, H_uv,
+            mode, padding_mode, B, C,
+        )
+
+        # Output dtype and device
+        target_dtype = output_dtype if output_dtype is not None else input_dtype
+        result = out_img.to(target_dtype)
+        mask_result = valid_mask
+        if not keep_on_device:
+            result = result.cpu()
+            mask_result = mask_result.cpu()
+
+        if not is_batch:
+            result = result.squeeze(0)
+            mask_result = mask_result.squeeze(0)
+
+        if return_mask:
+            if mask_result.shape[-3] == 1 and mask_result.ndim >= 3:
+                mask_result = mask_result.squeeze(-3)
+            return result, mask_result
+        return result
+
+    def _parse_src_rect(
+        self,
+        src_rect: Optional[Tuple[int, int, int, int]],
+        W_uv: int,
+        H_uv: int,
+    ) -> Tuple[int, int, int, int]:
+        if src_rect is not None:
+            return src_rect
+        return 0, 0, W_uv, H_uv
+
+    def _parse_dst_size(
+        self, dst_size: Optional[Tuple[int, int]]
+    ) -> Tuple[int, int, int, int]:
         if dst_size is None:
             dst_w = int(self.xy_bounds[2] - self.xy_bounds[0]) + 1
             dst_h = int(self.xy_bounds[3] - self.xy_bounds[1]) + 1
-            xy_offset_x = int(self.xy_bounds[0])
-            xy_offset_y = int(self.xy_bounds[1])
+            xy_off_x = int(self.xy_bounds[0])
+            xy_off_y = int(self.xy_bounds[1])
         else:
             dst_w, dst_h = dst_size
-            xy_offset_x, xy_offset_y = 0, 0
+            xy_off_x, xy_off_y = 0, 0
+        return dst_w, dst_h, xy_off_x, xy_off_y
 
-        # Build sampling grid
+    def _build_sampling_grid(
+        self,
+        dst_w: int,
+        dst_h: int,
+        xy_off_x: int,
+        xy_off_y: int,
+        uv_off_x: int,
+        uv_off_y: int,
+        uv_w: int,
+        uv_h: int,
+        has_src_rect: bool,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Build a (1, 2, dst_h, dst_w) UV sampling grid and a valid-pixel mask."""
         x_coords, y_coords, u_coords, v_coords = self.map_tensor.T
 
-        # Convert XY coordinates to pixel indices (XY: 0,0 is pixel center)
-        x_int = self._xy_to_pixel(x_coords) - xy_offset_x
-        y_int = self._xy_to_pixel(y_coords) - xy_offset_y
+        x_int = self._xy_to_pixel(x_coords) - xy_off_x
+        y_int = self._xy_to_pixel(y_coords) - xy_off_y
 
-        # Filter valid coordinates
         valid = (x_int >= 0) & (x_int < dst_w) & (y_int >= 0) & (y_int < dst_h)
-        if src_rect is not None:
+        if has_src_rect:
             uv_valid = (
-                (u_coords >= uv_offset_x)
-                & (u_coords < uv_offset_x + uv_w)
-                & (v_coords >= uv_offset_y)
-                & (v_coords < uv_offset_y + uv_h)
+                (u_coords >= uv_off_x) & (u_coords < uv_off_x + uv_w)
+                & (v_coords >= uv_off_y) & (v_coords < uv_off_y + uv_h)
             )
             valid = valid & uv_valid
 
-        x_valid, y_valid = x_int[valid], y_int[valid]
-        u_valid, v_valid = u_coords[valid], v_coords[valid]
+        x_v, y_v = x_int[valid], y_int[valid]
+        u_v, v_v = u_coords[valid], v_coords[valid]
 
-        # Create grid buffers
         grid_uv = torch.zeros(
             (1, 2, dst_h, dst_w), device=self.device, dtype=torch.float32
         )
@@ -594,77 +577,83 @@ class PixelMapWarperTorch:
             (1, 1, dst_h, dst_w), device=self.device, dtype=torch.float32
         )
 
-        # Scatter UV coordinates
-        flat_indices = y_valid * dst_w + x_valid
-        if len(flat_indices) > 0:
-            uv_stack = torch.stack([u_valid, v_valid], dim=0)
-            grid_flat = grid_uv.view(1, 2, -1)
-            count_flat = grid_count.view(1, 1, -1)
+        if len(x_v) > 0:
+            flat_idx = y_v * dst_w + x_v
+            uv_stack = torch.stack([u_v, v_v], dim=0)
+            g_flat = grid_uv.view(1, 2, -1)
+            c_flat = grid_count.view(1, 1, -1)
 
-            grid_flat.index_add_(2, flat_indices, uv_stack.unsqueeze(0))
-            ones = torch.ones(1, 1, len(flat_indices), device=self.device)
-            count_flat.index_add_(2, flat_indices, ones)
+            g_flat.index_add_(2, flat_idx, uv_stack.unsqueeze(0))
+            c_flat.index_add_(
+                2, flat_idx,
+                torch.ones(1, 1, len(flat_idx), device=self.device),
+            )
 
-            grid_uv = grid_flat.view(1, 2, dst_h, dst_w)
-            grid_count = count_flat.view(1, 1, dst_h, dst_w)
+            grid_uv = g_flat.view(1, 2, dst_h, dst_w)
+            grid_count = c_flat.view(1, 1, dst_h, dst_w)
 
-        # Average overlapping points and mark invalid pixels
         valid_mask = grid_count > 0
-        grid_uv = torch.where(valid_mask, grid_uv / (grid_count + 1e-8), grid_uv)
-
-        INVALID_COORD = -1e6
+        grid_uv = torch.where(valid_mask, grid_uv / (grid_count + _EPS), grid_uv)
         grid_uv = torch.where(
-            valid_mask, grid_uv, torch.full_like(grid_uv, INVALID_COORD)
+            valid_mask, grid_uv, torch.full_like(grid_uv, _INVALID_COORD)
         )
+        return grid_uv, valid_mask
 
-        # Inpaint grid
-        if inpaint != InpaintMethod.NONE and inpaint_iter > 0:
-            original_valid = valid_mask.clone()
-            grid_uv_for_inpaint = torch.where(
-                valid_mask, grid_uv, torch.zeros_like(grid_uv)
-            )
-            grid_uv_inpainted = self._apply_inpaint_conv(
-                grid_uv_for_inpaint, grid_count, inpaint_iter
-            )
-            inpaint_filled = grid_uv_inpainted.abs().sum(dim=1, keepdim=True) > 1e-6
-            grid_uv = torch.where(inpaint_filled, grid_uv_inpainted, grid_uv)
-            valid_mask_after = original_valid | inpaint_filled
-            grid_uv = torch.where(
-                valid_mask_after, grid_uv, torch.full_like(grid_uv, INVALID_COORD)
-            )
-        else:
-            valid_mask_after = valid_mask
+    def _inpaint_grid(
+        self,
+        grid_uv: torch.Tensor,
+        valid_mask: torch.Tensor,
+        iterations: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Inpaint holes in the sampling grid and return updated grid + mask."""
+        original_valid = valid_mask.clone()
+        grid_for_inpaint = torch.where(valid_mask, grid_uv, torch.zeros_like(grid_uv))
+        count = valid_mask.float()
+        grid_inpainted = self._apply_inpaint_conv(grid_for_inpaint, count, iterations)
 
-        # Convert UV coordinates to sampling coordinates
-        # UV coordinate system: (0.5, 0.5) is center of pixel (0, 0)
-        # Adjust for UV offset
-        sample_x = grid_uv[:, 0:1, :, :] - uv_offset_x
-        sample_y = grid_uv[:, 1:2, :, :] - uv_offset_y
+        filled = grid_inpainted.abs().sum(dim=1, keepdim=True) > _EPS
+        grid_uv = torch.where(filled, grid_inpainted, grid_uv)
+        valid_mask = original_valid | filled
+        grid_uv = torch.where(
+            valid_mask, grid_uv, torch.full_like(grid_uv, _INVALID_COORD)
+        )
+        return grid_uv, valid_mask
 
-        # Filter out-of-bounds
+    def _sample_from_grid(
+        self,
+        uv_img: torch.Tensor,
+        grid_uv: torch.Tensor,
+        valid_mask: torch.Tensor,
+        uv_off_x: int,
+        uv_off_y: int,
+        W_uv: int,
+        H_uv: int,
+        mode: str,
+        padding_mode: PaddingMode,
+        B: int,
+        C: int,
+    ) -> torch.Tensor:
+        """Sample from *uv_img* using the prebuilt grid."""
+        sample_x = grid_uv[:, 0:1, :, :] - uv_off_x
+        sample_y = grid_uv[:, 1:2, :, :] - uv_off_y
+
         in_bounds = (
-            (sample_x >= 0) & (sample_x < W_uv) & (sample_y >= 0) & (sample_y < H_uv)
+            (sample_x >= 0) & (sample_x < W_uv)
+            & (sample_y >= 0) & (sample_y < H_uv)
         )
-        valid_mask_after = valid_mask_after & in_bounds
+        valid_mask = valid_mask & in_bounds
         sample_x = torch.where(
-            in_bounds, sample_x, torch.full_like(sample_x, INVALID_COORD)
+            in_bounds, sample_x, torch.full_like(sample_x, _INVALID_COORD)
         )
         sample_y = torch.where(
-            in_bounds, sample_y, torch.full_like(sample_y, INVALID_COORD)
+            in_bounds, sample_y, torch.full_like(sample_y, _INVALID_COORD)
         )
 
-        # Normalize to [-1, 1] for grid_sample
-        # Using align_corners=False: norm=-1 maps to left edge (pixel -0.5)
-        #                            norm=+1 maps to right edge (pixel W-0.5)
-        # For UV coordinates where (0.5, 0.5) is pixel center:
-        #   pixel_center = 0.5 should map to norm = 2*0.5/W - 1 = 1/W - 1
-        # This means: norm = 2 * sample_x / W - 1
         norm_x = 2.0 * sample_x / max(W_uv, 1) - 1.0
         norm_y = 2.0 * sample_y / max(H_uv, 1) - 1.0
         grid = torch.cat([norm_x, norm_y], dim=1).permute(0, 2, 3, 1)
         grid_batch = grid.expand(B, -1, -1, -1)
 
-        # Sample using align_corners=False for UV coordinate convention
         out_img = F.grid_sample(
             uv_img,
             grid_batch,
@@ -673,30 +662,30 @@ class PixelMapWarperTorch:
             align_corners=False,
         )
 
-        # Apply mask for ZEROS mode
-        if padding_mode == PaddingMode.ZEROS and inpaint == InpaintMethod.NONE:
+        if padding_mode == PaddingMode.ZEROS:
             out_img = out_img * valid_mask.expand(B, C, -1, -1).float()
 
-        # Remove batch dim
-        if not is_batch:
-            out_img = out_img.squeeze(0)
-            valid_mask_after = valid_mask_after.squeeze(0)
+        return out_img
 
-        # Transfer to CPU & adjust dtype
-        out_img_cpu = out_img.cpu()
-        valid_mask_after_cpu = valid_mask_after.cpu()
+    # ------------------------------------------------------------------
+    # Inpainting
+    # ------------------------------------------------------------------
 
-        target_dtype = output_dtype if output_dtype is not None else input_dtype
-        out_img_cpu = out_img_cpu.to(target_dtype)
+    def _get_inpaint_kernels(
+        self, channels: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return cached 3x3 inpainting kernels for the given channel count."""
+        if channels in self._inpaint_kernels:
+            return self._inpaint_kernels[channels]
 
-        if return_mask:
-            mask_out = (
-                valid_mask_after_cpu.squeeze(1)
-                if valid_mask_after_cpu.shape[1] == 1
-                else valid_mask_after_cpu
-            )
-            return out_img_cpu, mask_out
-        return out_img_cpu
+        base = torch.tensor(
+            [[1, 1, 1], [1, 0, 1], [1, 1, 1]],
+            device=self.device, dtype=torch.float32,
+        )
+        color_kernel = (base / base.sum()).view(1, 1, 3, 3).repeat(channels, 1, 1, 1)
+        weight_kernel = base.view(1, 1, 3, 3)
+        self._inpaint_kernels[channels] = (color_kernel, weight_kernel)
+        return color_kernel, weight_kernel
 
     def _apply_inpaint_conv(
         self,
@@ -708,74 +697,45 @@ class PixelMapWarperTorch:
         GPU-based inpainting using convolution.
 
         Fills empty regions with weighted average of neighboring valid pixels.
-
-        Args:
-            img: Image tensor (B, C, H, W)
-            count_img: Count tensor indicating valid pixels (B, 1, H, W)
-            iterations: Number of inpainting iterations
-
-        Returns:
-            Inpainted image
         """
-        mask = (count_img == 0).float()
         C = img.shape[1]
+        kernel, weight_kernel = self._get_inpaint_kernels(C)
 
-        # 3x3 kernel (excluding center)
-        kernel = torch.tensor(
-            [[1, 1, 1], [1, 0, 1], [1, 1, 1]], device=self.device, dtype=torch.float32
-        )
-        kernel = kernel / kernel.sum()
-        kernel = kernel.view(1, 1, 3, 3).repeat(C, 1, 1, 1)
-
-        weight_kernel = torch.tensor(
-            [[1, 1, 1], [1, 0, 1], [1, 1, 1]], device=self.device, dtype=torch.float32
-        ).view(1, 1, 3, 3)
-
+        mask = (count_img == 0).float()
         current_img = img.clone()
         current_valid = (count_img > 0).float()
 
         for _ in range(iterations):
             is_hole = mask > 0.5
 
-            # Weighted average of neighbors
             neighbor_sum = F.conv2d(
                 current_img * current_valid.expand(-1, C, -1, -1),
-                kernel,
-                padding=1,
-                groups=C,
+                kernel, padding=1, groups=C,
             )
-            neighbor_weight = F.conv2d(current_valid, weight_kernel, padding=1).clamp(
-                min=1e-8
-            )
+            neighbor_weight = F.conv2d(
+                current_valid, weight_kernel, padding=1
+            ).clamp(min=_EPS)
             neighbor_avg = neighbor_sum / neighbor_weight
 
-            # Update holes
             current_img = torch.where(is_hole, neighbor_avg, current_img)
             current_valid = torch.where(
-                is_hole & (neighbor_weight > 1e-6),
+                is_hole & (neighbor_weight > _EPS),
                 torch.ones_like(current_valid),
                 current_valid,
             )
-
-            # Erode mask
             mask = -F.max_pool2d(-mask, kernel_size=3, stride=1, padding=1)
 
         return current_img
 
-    def get_bounds(self) -> dict:
-        """
-        Get the coordinate bounds of the pixel map.
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
 
-        Returns:
-            Dictionary with 'xy' and 'uv' bounds as (min_x, min_y, max_x, max_y).
-        """
-        return {
-            "xy": self.xy_bounds,
-            "uv": self.uv_bounds,
-        }
+    def get_bounds(self) -> dict:
+        """Get the coordinate bounds of the pixel map."""
+        return {"xy": self.xy_bounds, "uv": self.uv_bounds}
 
     def __len__(self) -> int:
-        """Return the number of pixel correspondences."""
         return len(self.map_tensor)
 
     def __repr__(self) -> str:
@@ -786,135 +746,3 @@ class PixelMapWarperTorch:
             f"uv_bounds={self.uv_bounds}, "
             f"device='{self.device}')"
         )
-
-
-# -----------------------------------------------------------------------------
-# Example usage and comparison
-# -----------------------------------------------------------------------------
-
-
-def main():
-    """Example demonstrating forward and backward warping with comparison."""
-    import cv2
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
-
-    # Create test data
-    src_h, src_w = 100, 100
-    dst_h, dst_w = 200, 200
-
-    # Source image: color gradient
-    src_img_np = np.zeros((src_h, src_w, 3), dtype=np.uint8)
-    for y in range(src_h):
-        for x in range(src_w):
-            src_img_np[y, x] = [x * 2, y * 2, (x + y)]
-    src_img_tensor = torch.from_numpy(src_img_np).permute(2, 0, 1)
-
-    # Create map: scale + translation
-    # XY coordinate (x, y) where (0,0) is pixel center
-    # -> UV coordinate (u, v) where (0.5, 0.5) is pixel center
-    # src pixel (x, y) -> dst pixel at approximately (x * 1.8 + 20, y * 1.8 + 20)
-    scale = 1.8
-    map_list = []
-    for y in range(src_h):
-        for x in range(src_w):
-            # XY: integer coordinates are pixel centers
-            xy = (float(x), float(y))
-            # UV: pixel center is at (pixel_idx + 0.5)
-            uv = (x * scale + 20 + 0.5, y * scale + 20 + 0.5)
-            map_list.append((xy, uv))
-
-    # Initialize warper
-    warper = PixelMapWarperTorch(map_list, device=device)
-    print(f"Warper: {warper}")
-
-    # Compare splatting methods
-    print("\n=== Forward Warp Comparison ===")
-
-    # Nearest (original - has holes)
-    print("Forward warping with NEAREST (original method, causes holes)...")
-    out_nearest = warper.forward_warp(
-        src_img_tensor,
-        dst_size=(dst_w, dst_h),
-        splat_method=SplatMethod.NEAREST,
-        aggregation=AggregationMethod.MEAN,
-        inpaint=InpaintMethod.NONE,
-    )
-
-    # Bilinear (improved - no holes)
-    print("Forward warping with BILINEAR (improved, no holes)...")
-    out_bilinear = warper.forward_warp(
-        src_img_tensor,
-        dst_size=(dst_w, dst_h),
-        splat_method=SplatMethod.BILINEAR,
-        aggregation=AggregationMethod.MEAN,
-        inpaint=InpaintMethod.NONE,
-    )
-
-    # Nearest with inpainting
-    print("Forward warping with NEAREST + inpainting...")
-    out_nearest_inpaint = warper.forward_warp(
-        src_img_tensor,
-        dst_size=(dst_w, dst_h),
-        splat_method=SplatMethod.NEAREST,
-        aggregation=AggregationMethod.MEAN,
-        inpaint=InpaintMethod.CONV,
-        inpaint_iter=5,
-    )
-
-    # Save forward warp results
-    cv2.imwrite(
-        "forward_nearest.png",
-        out_nearest.permute(1, 2, 0).byte().cpu().numpy(),
-    )
-    cv2.imwrite(
-        "forward_bilinear.png",
-        out_bilinear.permute(1, 2, 0).byte().cpu().numpy(),
-    )
-    cv2.imwrite(
-        "forward_nearest_inpaint.png",
-        out_nearest_inpaint.permute(1, 2, 0).byte().cpu().numpy(),
-    )
-
-    # Count holes
-    nearest_holes = (out_nearest.sum(dim=0) == 0).sum().item()
-    bilinear_holes = (out_bilinear.sum(dim=0) == 0).sum().item()
-    nearest_inpaint_holes = (out_nearest_inpaint.sum(dim=0) == 0).sum().item()
-
-    print(f"\nHole count comparison:")
-    print(f"  NEAREST:           {nearest_holes} holes")
-    print(f"  BILINEAR:          {bilinear_holes} holes")
-    print(f"  NEAREST + INPAINT: {nearest_inpaint_holes} holes")
-
-    # Backward warp test
-    print("\n=== Backward Warp ===")
-    print("Backward warping (UV -> XY)...")
-    out_backward, mask = warper.backward_warp(
-        out_bilinear,
-        dst_size=(src_w, src_h),
-        padding_mode=PaddingMode.ZEROS,
-        inpaint=InpaintMethod.CONV,
-        inpaint_iter=5,
-        return_mask=True,
-    )
-
-    cv2.imwrite(
-        "backward_warp.png",
-        out_backward.permute(1, 2, 0).byte().cpu().numpy(),
-    )
-    cv2.imwrite(
-        "backward_mask.png",
-        (mask.squeeze().cpu().numpy() * 255).astype(np.uint8),
-    )
-
-    print("\nSaved files:")
-    print("  forward_nearest.png        - NEAREST splatting (has holes)")
-    print("  forward_bilinear.png       - BILINEAR splatting (no holes)")
-    print("  forward_nearest_inpaint.png - NEAREST + inpainting")
-    print("  backward_warp.png          - Backward warp result")
-    print("  backward_mask.png          - Valid pixel mask")
-
-
-if __name__ == "__main__":
-    main()
