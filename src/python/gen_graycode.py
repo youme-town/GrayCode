@@ -7,7 +7,7 @@ import cv2
 from cv2 import structured_light
 import numpy as np
 
-from .config import get_config
+from .config import get_config, reload_config, split_cli_config_path
 
 
 def generate_expanded_patterns(
@@ -48,7 +48,8 @@ def print_usage() -> None:
     print(
         "Usage : python gen_graycode.py "
         "<projector image height> <projector image width> "
-        "[graycode width_step(default=1)] [graycode height_step(default=1)]"
+        "[graycode width_step(default=1)] [graycode height_step(default=1)] "
+        "[--config <config.toml>]"
     )
     print()
 
@@ -56,6 +57,15 @@ def print_usage() -> None:
 def main(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv
+    try:
+        argv, config_path = split_cli_config_path(argv)
+    except ValueError as e:
+        print(e)
+        print_usage()
+        return
+
+    if config_path is not None:
+        reload_config(config_path)
 
     if len(argv) not in (3, 5):
         print_usage()

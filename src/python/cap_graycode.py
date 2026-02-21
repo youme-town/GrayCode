@@ -7,7 +7,7 @@ from typing import List
 
 from edsdk.camera_controller import CameraController
 
-from .config import get_config
+from .config import get_config, reload_config, split_cli_config_path
 
 
 def open_cam() -> None:
@@ -33,13 +33,25 @@ def capture() -> np.ndarray:
 
 
 def print_usage() -> None:
-    print("Usage : python cap_graycode.py <window position x> <window position y>")
+    print(
+        "Usage : python cap_graycode.py <window position x> <window position y> "
+        "[--config <config.toml>]"
+    )
     print()
 
 
 def main(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv
+    try:
+        argv, config_path = split_cli_config_path(argv)
+    except ValueError as e:
+        print(e)
+        print_usage()
+        return
+
+    if config_path is not None:
+        reload_config(config_path)
 
     if len(argv) != 3:
         print_usage()

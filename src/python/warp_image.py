@@ -25,16 +25,6 @@ from enum import Enum
 
 from .config import get_config
 
-# ---------------------------------------------------------------------------
-# Constants (loaded from config for tunability, resolved once at import time)
-# ---------------------------------------------------------------------------
-_warp_cfg = get_config().warp
-_EPS = _warp_cfg.advanced.eps
-_LARGE_POS = _warp_cfg.advanced.large_pos
-_LARGE_NEG = _warp_cfg.advanced.large_neg
-_INVALID_COORD = _warp_cfg.advanced.invalid_coord
-
-
 class AggregationMethod(Enum):
     """Aggregation method when multiple pixels map to the same location."""
 
@@ -131,6 +121,14 @@ class PixelMapWarperTorch:
         mask = ~torch.isnan(self.map_tensor).any(dim=1)
         self.map_tensor = self.map_tensor[mask]
 
+        # Load tunable numeric constants from config at instance creation time.
+        # インポート時ではなく、インスタンス生成時に設定値を解決する。
+        adv_cfg = get_config().warp.advanced
+        self._eps = adv_cfg.eps
+        self._large_pos = adv_cfg.large_pos
+        self._large_neg = adv_cfg.large_neg
+        self._invalid_coord = adv_cfg.invalid_coord
+
         self._cache_bounds()
         self._inpaint_kernels: dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
 
@@ -221,8 +219,8 @@ class PixelMapWarperTorch:
             out.scatter_(2, idx_exp, values)
             weights.index_add_(0, dst_indices, w_add)
 
-    @staticmethod
     def _finalize_aggregation(
+        self,
         out: torch.Tensor,
         weights: torch.Tensor,
         aggregation: AggregationMethod,
@@ -231,19 +229,18 @@ class PixelMapWarperTorch:
         if aggregation == AggregationMethod.MEAN:
             w = weights.view(1, 1, -1)
             mask = w > 0
-            out.copy_(torch.where(mask, out / (w + _EPS), out))
+            out.copy_(torch.where(mask, out / (w + self._eps), out))
         elif aggregation == AggregationMethod.MIN:
-            out[out == _LARGE_POS] = 0
+            out[out == self._large_pos] = 0
         elif aggregation == AggregationMethod.MAX:
-            out[out == _LARGE_NEG] = 0
+            out[out == self._large_neg] = 0
 
-    @staticmethod
-    def _init_fill(aggregation: AggregationMethod) -> float:
+    def _init_fill(self, aggregation: AggregationMethod) -> float:
         """Return the initial fill value for the output buffer."""
         if aggregation == AggregationMethod.MIN:
-            return _LARGE_POS
+            return self._large_pos
         if aggregation == AggregationMethod.MAX:
-            return _LARGE_NEG
+            return self._large_neg
         return 0.0
 
     # ------------------------------------------------------------------
@@ -601,9 +598,9 @@ class PixelMapWarperTorch:
             grid_count = c_flat.view(1, 1, dst_h, dst_w)
 
         valid_mask = grid_count > 0
-        grid_uv = torch.where(valid_mask, grid_uv / (grid_count + _EPS), grid_uv)
+        grid_uv = torch.where(valid_mask, grid_uv / (grid_count + self._eps), grid_uv)
         grid_uv = torch.where(
-            valid_mask, grid_uv, torch.full_like(grid_uv, _INVALID_COORD)
+            valid_mask, grid_uv, torch.full_like(grid_uv, self._invalid_coord)
         )
         return grid_uv, valid_mask
 
@@ -619,11 +616,11 @@ class PixelMapWarperTorch:
         count = valid_mask.float()
         grid_inpainted = self._apply_inpaint_conv(grid_for_inpaint, count, iterations)
 
-        filled = grid_inpainted.abs().sum(dim=1, keepdim=True) > _EPS
+        filled = grid_inpainted.abs().sum(dim=1, keepdim=True) > self._eps
         grid_uv = torch.where(filled, grid_inpainted, grid_uv)
         valid_mask = original_valid | filled
         grid_uv = torch.where(
-            valid_mask, grid_uv, torch.full_like(grid_uv, _INVALID_COORD)
+            valid_mask, grid_uv, torch.full_like(grid_uv, self._invalid_coord)
         )
         return grid_uv, valid_mask
 
@@ -651,10 +648,10 @@ class PixelMapWarperTorch:
         )
         valid_mask = valid_mask & in_bounds
         sample_x = torch.where(
-            in_bounds, sample_x, torch.full_like(sample_x, _INVALID_COORD)
+            in_bounds, sample_x, torch.full_like(sample_x, self._invalid_coord)
         )
         sample_y = torch.where(
-            in_bounds, sample_y, torch.full_like(sample_y, _INVALID_COORD)
+            in_bounds, sample_y, torch.full_like(sample_y, self._invalid_coord)
         )
 
         norm_x = 2.0 * sample_x / max(W_uv, 1) - 1.0
@@ -722,12 +719,12 @@ class PixelMapWarperTorch:
             )
             neighbor_weight = F.conv2d(
                 current_valid, weight_kernel, padding=1
-            ).clamp(min=_EPS)
+            ).clamp(min=self._eps)
             neighbor_avg = neighbor_sum / neighbor_weight
 
             current_img = torch.where(is_hole, neighbor_avg, current_img)
             current_valid = torch.where(
-                is_hole & (neighbor_weight > _EPS),
+                is_hole & (neighbor_weight > self._eps),
                 torch.ones_like(current_valid),
                 current_valid,
             )

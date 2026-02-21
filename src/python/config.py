@@ -13,7 +13,7 @@ import tomllib
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 # Project root: two levels up from src/python/config.py
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -193,3 +193,36 @@ def reload_config(config_path: Optional[Path] = None) -> AppConfig:
     global _config
     _config = load_config(config_path)
     return _config
+
+
+def split_cli_config_path(argv: Sequence[str]) -> tuple[list[str], Optional[Path]]:
+    """Split optional ``--config`` / ``-c`` from CLI arguments.
+
+    Returns the cleaned argv and the selected config path.
+    """
+    cleaned: list[str] = []
+    config_path: Optional[Path] = None
+
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+
+        if arg in ("--config", "-c"):
+            if i + 1 >= len(argv):
+                raise ValueError("`--config` requires a file path.")
+            config_path = Path(argv[i + 1])
+            i += 2
+            continue
+
+        if arg.startswith("--config="):
+            value = arg.split("=", 1)[1]
+            if value == "":
+                raise ValueError("`--config` requires a file path.")
+            config_path = Path(value)
+            i += 1
+            continue
+
+        cleaned.append(arg)
+        i += 1
+
+    return cleaned, config_path

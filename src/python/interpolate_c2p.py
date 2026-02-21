@@ -14,7 +14,7 @@ try:
 except ImportError:
     SCIPY_AVAILABLE = False
 
-from .config import get_config
+from .config import get_config, reload_config, split_cli_config_path
 
 _INPAINT_METHOD_MAP = {
     "TELEA": cv2.INPAINT_TELEA,
@@ -344,10 +344,23 @@ def create_vis_image(
 def main(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv
+    try:
+        argv, config_path = split_cli_config_path(argv)
+    except ValueError as e:
+        print(e)
+        print(
+            "Usage : python interpolate_c2p.py <c2p_numpy_filename> <cam_height> <cam_width> [method] [--config <config.toml>]"
+        )
+        print("   method: 'inpaint' (default) or 'delaunay'")
+        print()
+        return
+
+    if config_path is not None:
+        reload_config(config_path)
 
     if len(argv) < 4:
         print(
-            "Usage : python interpolate_c2p.py <c2p_numpy_filename> <cam_height> <cam_width> [method]"
+            "Usage : python interpolate_c2p.py <c2p_numpy_filename> <cam_height> <cam_width> [method] [--config <config.toml>]"
         )
         print("   method: 'inpaint' (default) or 'delaunay'")
         print()

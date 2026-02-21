@@ -13,7 +13,7 @@ try:
 except ImportError:
     SCIPY_AVAILABLE = False
 
-from .config import get_config
+from .config import get_config, reload_config, split_cli_config_path
 
 
 def load_p2c_numpy_array(map_file_path: str) -> np.ndarray:
@@ -178,11 +178,23 @@ def create_vis_image_p2c(
 def main(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv
+    try:
+        argv, config_path = split_cli_config_path(argv)
+    except ValueError as e:
+        print(e)
+        print(
+            "Usage : python interpolate_p2c.py <p2c_numpy_filename> <proj_height> <proj_width> [--config <config.toml>]"
+        )
+        print()
+        return
+
+    if config_path is not None:
+        reload_config(config_path)
 
     if len(argv) < 4:
         print(
             "Usage : python interpolate_p2c.py "
-            "<p2c_numpy_filename> <proj_height> <proj_width>"
+            "<p2c_numpy_filename> <proj_height> <proj_width> [--config <config.toml>]"
         )
         print()
         return

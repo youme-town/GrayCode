@@ -8,7 +8,7 @@ from . import cap_graycode
 from . import decode
 from . import interpolate_c2p
 from . import warp_image  # まだ自動では呼ばないが import だけしておく
-from .config import get_config
+from .config import get_config, reload_config, split_cli_config_path
 
 
 @dataclass
@@ -113,6 +113,15 @@ def main(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv
 
+    try:
+        argv, config_path = split_cli_config_path(argv)
+    except ValueError as e:
+        print(e)
+        return
+
+    if config_path is not None:
+        reload_config(config_path)
+
     # 引数なし（argv[0] のみ）の場合は config.toml の値をそのまま使用。
     # 引数ありの場合は CLI 値を優先し、省略分は config から補完。
     if len(argv) > 7:
@@ -120,7 +129,7 @@ def main(argv: list[str] | None = None) -> None:
         print(
             "Usage: python -m src.python.pipeline "
             "[proj_height] [proj_width] [height_step] [width_step] "
-            "[window_pos_x] [window_pos_y]"
+            "[window_pos_x] [window_pos_y] [--config <config.toml>]"
         )
         print(
             f"  全引数省略時は config.toml の値を使用します "

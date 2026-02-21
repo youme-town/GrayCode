@@ -11,14 +11,15 @@ from collections import defaultdict
 import cv2
 import numpy as np
 
-from .config import get_config
+from .config import get_config, reload_config, split_cli_config_path
 
 
 def print_usage() -> None:
     print(
         "Usage : python decode.py "
         "<projector image height> <projector image width> "
-        "[graycode height_step(default=1)] [graycode width_step(default=1)]"
+        "[graycode height_step(default=1)] [graycode width_step(default=1)] "
+        "[--config <config.toml>]"
     )
     print()
 
@@ -37,6 +38,15 @@ def load_images(pattern: str) -> List[np.ndarray]:
 def main(argv: list[str] | None = None) -> tuple[int, int] | None:
     if argv is None:
         argv = sys.argv
+    try:
+        argv, config_path = split_cli_config_path(argv)
+    except ValueError as e:
+        print(e)
+        print_usage()
+        return None
+
+    if config_path is not None:
+        reload_config(config_path)
 
     # 3個: decode.py H W
     # 5個: decode.py H W height_step width_step
