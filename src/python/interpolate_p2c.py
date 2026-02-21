@@ -13,6 +13,8 @@ try:
 except ImportError:
     SCIPY_AVAILABLE = False
 
+from .config import get_config
+
 
 def load_p2c_numpy_array(map_file_path: str) -> np.ndarray:
     """P2C の npy を読み込んで (N, 4) float32 配列で返す。
@@ -227,10 +229,14 @@ def main(argv: list[str] | None = None) -> None:
 
     # CSV 保存
     csv_filename = "result_p2c_compensated_delaunay.csv"
+    precision = get_config().interpolate_p2c.csv_precision
     with open(csv_filename, "w", encoding="utf-8") as f:
         f.write("proj_x, proj_y, cam_x, cam_y\n")
         for row in p2c_interp:
-            f.write(f"{row[0]:.4f}, {row[1]:.4f}, {row[2]:.4f}, {row[3]:.4f}\n")
+            f.write(
+                f"{row[0]:.{precision}f}, {row[1]:.{precision}f}, "
+                f"{row[2]:.{precision}f}, {row[3]:.{precision}f}\n"
+            )
 
     print(f"output : './{csv_filename}'")
     print()

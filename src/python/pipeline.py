@@ -8,6 +8,7 @@ from . import cap_graycode
 from . import decode
 from . import interpolate_c2p
 from . import warp_image  # まだ自動では呼ばないが import だけしておく
+from .config import get_config
 
 
 @dataclass
@@ -87,12 +88,13 @@ def run_graycode_pipeline(cfg: GraycodePipelineConfig) -> None:
     # 4. 対応点補間（result_c2p_compensated.npy / .csv を生成）
     if cfg.run_interpolate and cam_height > 0 and cam_width > 0:
         # decode.py が出力する既定ファイル名をそのまま使う
+        app_cfg = get_config().pipeline
         interp_argv = [
             "interpolate_c2p.py",
-            "result_c2p.npy",
+            app_cfg.default_input_file,
             str(cam_height),
             str(cam_width),
-            "delaunay",
+            app_cfg.default_interpolation_method,
         ]
         print("[4/4] Interpolating c2p correspondences...")
         interpolate_c2p.main(interp_argv)
@@ -111,28 +113,36 @@ def main(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv
 
-    # argv[0] はモジュール/スクリプト名。
-    # 必須2引数 + 任意4引数まで受け付けるので、len(argv) は 3..7。
-    if not (3 <= len(argv) <= 7):
+    # 引数なし（argv[0] のみ）の場合は config.toml の値をそのまま使用。
+    # 引数ありの場合は CLI 値を優先し、省略分は config から補完。
+    if len(argv) > 7:
+        pcfg = get_config().pipeline
         print(
             "Usage: python -m src.python.pipeline "
-            "<proj_height> <proj_width> [height_step] [width_step] [window_pos_x] [window_pos_y]"
+            "[proj_height] [proj_width] [height_step] [width_step] "
+            "[window_pos_x] [window_pos_y]"
         )
         print(
-            "  height_step, width_step, window_pos_x, window_pos_y は省略時 1, 1, 0, 0 として扱います。"
+            f"  全引数省略時は config.toml の値を使用します "
+            f"(現在: {pcfg.proj_height}x{pcfg.proj_width}, "
+            f"step={pcfg.height_step}x{pcfg.width_step}, "
+            f"window=({pcfg.window_pos_x},{pcfg.window_pos_y}))"
         )
         return
 
+    pcfg = get_config().pipeline
+
     try:
-        proj_height = int(argv[1])
-        proj_width = int(argv[2])
-        height_step = int(argv[3]) if len(argv) >= 4 else 1
-        width_step = int(argv[4]) if len(argv) >= 5 else 1
-        window_pos_x = int(argv[5]) if len(argv) >= 6 else 0
-        window_pos_y = int(argv[6]) if len(argv) >= 7 else 0
+        proj_height = int(argv[1]) if len(argv) >= 2 else pcfg.proj_height
+        proj_width = int(argv[2]) if len(argv) >= 3 else pcfg.proj_width
+        height_step = int(argv[3]) if len(argv) >= 4 else pcfg.height_step
+        width_step = int(argv[4]) if len(argv) >= 5 else pcfg.width_step
+        window_pos_x = int(argv[5]) if len(argv) >= 6 else pcfg.window_pos_x
+        window_pos_y = int(argv[6]) if len(argv) >= 7 else pcfg.window_pos_y
     except ValueError:
         print(
-            "proj_height, proj_width, height_step, width_step, window_pos_x, window_pos_y は整数で指定してください。"
+            "proj_height, proj_width, height_step, width_step, "
+            "window_pos_x, window_pos_y は整数で指定してください。"
         )
         return
 

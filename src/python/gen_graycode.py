@@ -7,8 +7,7 @@ import cv2
 from cv2 import structured_light
 import numpy as np
 
-TARGETDIR = Path("data/graycode_pattern")
-CAPTUREDDIR = Path("data/captured")
+from .config import get_config
 
 
 def generate_expanded_patterns(
@@ -72,17 +71,21 @@ def main(argv: list[str] | None = None) -> None:
         print_usage()
         return
 
+    cfg = get_config()
+    target_dir = Path(cfg.paths.pattern_dir)
+    captured_dir = Path(cfg.paths.captured_dir)
+
     patterns = generate_expanded_patterns(height, width, height_step, width_step)
-    save_patterns(patterns, TARGETDIR)
+    save_patterns(patterns, target_dir)
 
     print("=== Result ===")
     print(
-        f"'{TARGETDIR}/pattern_00.png ~ "
+        f"'{target_dir}/pattern_00.png ~ "
         f"pattern_{len(patterns) - 1:02d}.png' were generated"
     )
     print()
     print("=== Next step ===")
-    print(f"Project patterns and save captured images as '{CAPTUREDDIR}/capture_*.png'")
+    print(f"Project patterns and save captured images as '{captured_dir}/capture_*.png'")
     print()
 
 

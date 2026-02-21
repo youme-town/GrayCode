@@ -11,12 +11,7 @@ from collections import defaultdict
 import cv2
 import numpy as np
 
-
-TARGETDIR = Path("data/graycode_pattern")
-CAPTUREDDIR = Path("data/captured")
-
-BLACKTHR = 50
-WHITETHR = 5
+from .config import get_config
 
 
 def print_usage() -> None:
@@ -59,17 +54,22 @@ def main(argv: list[str] | None = None) -> tuple[int, int] | None:
         print_usage()
         return
 
+    cfg = get_config()
+    captured_dir = Path(cfg.paths.captured_dir)
+    black_thr = cfg.decode.black_threshold
+    white_thr = cfg.decode.white_threshold
+
     gc_width = ((proj_width - 1) // width_step) + 1
     gc_height = ((proj_height - 1) // height_step) + 1
 
     graycode = cv2.structured_light.GrayCodePattern.create(gc_width, gc_height)
-    graycode.setBlackThreshold(BLACKTHR)
-    graycode.setWhiteThreshold(WHITETHR)
+    graycode.setBlackThreshold(black_thr)
+    graycode.setWhiteThreshold(white_thr)
 
     re_num = re.compile(r"(\d+)")
 
     filenames = sorted(
-        glob.glob(str(CAPTUREDDIR / "capture_*.png")),
+        glob.glob(str(captured_dir / "capture_*.png")),
         key=lambda t: numerical_sort(t, re_num),
     )
 
@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> tuple[int, int] | None:
 
     # 差分画像をNumPyで一括計算して「候補ピクセル」のマスクを作成
     diff = white.astype(np.int16) - black.astype(np.int16)
-    valid_mask = diff > BLACKTHR
+    valid_mask = diff > black_thr
 
     # 有効画素のインデックスをまとめて取得
     ys, xs = np.where(valid_mask)

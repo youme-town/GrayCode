@@ -1,0 +1,52 @@
+# GrayCode Project Configuration
+
+[paths]
+pattern_dir = "data/graycode_pattern"
+captured_dir = "data/captured"
+
+[camera]
+av = 5
+tv = "1/15"                # 分数表記・小数どちらも可
+iso = 100
+image_quality = "LJF"
+wait_key_ms = 500
+
+[decode]
+black_threshold = 50
+white_threshold = 5
+
+[interpolate_c2p]
+inpaint_radius = 3.0
+inpaint_method = "TELEA"       # "TELEA" or "NS"
+default_method = "inpaint"     # "inpaint" or "delaunay"
+csv_precision = 4
+
+[interpolate_p2c]
+csv_precision = 4
+
+[pipeline]
+proj_height = 1080
+proj_width = 1920
+height_step = 1
+width_step = 1
+window_pos_x = 0
+window_pos_y = 0
+default_interpolation_method = "delaunay"
+default_input_file = "result_c2p.npy"
+
+[warp]
+default_splat_method = "bilinear"    # "bilinear" or "nearest"
+default_aggregation = "mean"         # "mean", "max", "min", "last"
+default_inpaint = "none"             # "none" or "conv"
+default_inpaint_iter_forward = 3
+default_inpaint_iter_backward = 5
+default_backward_mode = "bilinear"   # "bilinear" or "nearest"
+default_padding_mode = "zeros"       # "zeros", "border", "reflection"
+inpaint_kernel_size = 3
+
+[warp.advanced]
+# Internal algorithmic constants - change only if you understand the implications
+eps = 1e-8
+large_pos = 1e9
+large_neg = -1e9
+invalid_coord = -1e6

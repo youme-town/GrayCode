@@ -23,13 +23,16 @@ import numpy as np
 from typing import List, Tuple, Optional, Union
 from enum import Enum
 
+from .config import get_config
+
 # ---------------------------------------------------------------------------
-# Constants
+# Constants (loaded from config for tunability, resolved once at import time)
 # ---------------------------------------------------------------------------
-_EPS = 1e-8
-_LARGE_POS = 1e9
-_LARGE_NEG = -1e9
-_INVALID_COORD = -1e6
+_warp_cfg = get_config().warp
+_EPS = _warp_cfg.advanced.eps
+_LARGE_POS = _warp_cfg.advanced.large_pos
+_LARGE_NEG = _warp_cfg.advanced.large_neg
+_INVALID_COORD = _warp_cfg.advanced.invalid_coord
 
 
 class AggregationMethod(Enum):
@@ -252,10 +255,10 @@ class PixelMapWarperTorch:
         src_img: torch.Tensor,
         dst_size: Optional[Tuple[int, int]] = None,
         src_offset: Tuple[int, int] = (0, 0),
-        splat_method: SplatMethod = SplatMethod.BILINEAR,
-        aggregation: AggregationMethod = AggregationMethod.MEAN,
-        inpaint: InpaintMethod = InpaintMethod.NONE,
-        inpaint_iter: int = 3,
+        splat_method: Optional[SplatMethod] = None,
+        aggregation: Optional[AggregationMethod] = None,
+        inpaint: Optional[InpaintMethod] = None,
+        inpaint_iter: Optional[int] = None,
         crop_rect: Optional[Tuple[int, int, int, int]] = None,
         output_dtype: Optional[torch.dtype] = None,
         keep_on_device: bool = False,
@@ -267,10 +270,10 @@ class PixelMapWarperTorch:
             src_img: Source image in XY coordinates. Shape: (C, H, W) or (B, C, H, W)
             dst_size: Output size as (width, height). If None, auto-calculated.
             src_offset: Offset for source coordinates (x_offset, y_offset).
-            splat_method: Splatting method (NEAREST or BILINEAR).
-            aggregation: Method for handling overlapping pixels.
-            inpaint: Method for filling holes in the output.
-            inpaint_iter: Number of inpainting iterations.
+            splat_method: Splatting method (NEAREST or BILINEAR). None uses config default.
+            aggregation: Method for handling overlapping pixels. None uses config default.
+            inpaint: Method for filling holes in the output. None uses config default.
+            inpaint_iter: Number of inpainting iterations. None uses config default.
             crop_rect: Crop region (x, y, width, height) in UV space.
             output_dtype: Desired output dtype. If None, matches input.
             keep_on_device: If True, keep the result on the computation device.
@@ -278,6 +281,16 @@ class PixelMapWarperTorch:
         Returns:
             Warped image in UV coordinates. Shape matches input batch format.
         """
+        wcfg = get_config().warp
+        if splat_method is None:
+            splat_method = SplatMethod(wcfg.default_splat_method)
+        if aggregation is None:
+            aggregation = AggregationMethod(wcfg.default_aggregation)
+        if inpaint is None:
+            inpaint = InpaintMethod(wcfg.default_inpaint)
+        if inpaint_iter is None:
+            inpaint_iter = wcfg.default_inpaint_iter_forward
+
         is_batch = src_img.ndim == 4
         if not is_batch:
             src_img = src_img.unsqueeze(0)
@@ -425,10 +438,10 @@ class PixelMapWarperTorch:
         uv_img: torch.Tensor,
         dst_size: Optional[Tuple[int, int]] = None,
         src_rect: Optional[Tuple[int, int, int, int]] = None,
-        mode: str = "bilinear",
-        padding_mode: PaddingMode = PaddingMode.ZEROS,
-        inpaint: InpaintMethod = InpaintMethod.NONE,
-        inpaint_iter: int = 5,
+        mode: Optional[str] = None,
+        padding_mode: Optional[PaddingMode] = None,
+        inpaint: Optional[InpaintMethod] = None,
+        inpaint_iter: Optional[int] = None,
         return_mask: bool = False,
         output_dtype: Optional[torch.dtype] = None,
         keep_on_device: bool = False,
@@ -440,10 +453,10 @@ class PixelMapWarperTorch:
             uv_img: Source image in UV coordinates. Shape: (C, H, W) or (B, C, H, W)
             dst_size: Output size as (width, height) in XY space.
             src_rect: Region in UV space that uv_img covers, as (u, v, width, height).
-            mode: Interpolation mode ('bilinear' or 'nearest').
-            padding_mode: How to handle pixels with no correspondence.
-            inpaint: Inpainting method for grid holes.
-            inpaint_iter: Number of inpainting iterations.
+            mode: Interpolation mode ('bilinear' or 'nearest'). None uses config default.
+            padding_mode: How to handle pixels with no correspondence. None uses config default.
+            inpaint: Inpainting method for grid holes. None uses config default.
+            inpaint_iter: Number of inpainting iterations. None uses config default.
             return_mask: If True, also return a mask of valid pixels.
             output_dtype: Desired output dtype. If None, matches input.
             keep_on_device: If True, keep the result on the computation device.
@@ -452,6 +465,16 @@ class PixelMapWarperTorch:
             Warped image in XY coordinates.
             If return_mask=True, returns tuple (image, mask).
         """
+        wcfg = get_config().warp
+        if mode is None:
+            mode = wcfg.default_backward_mode
+        if padding_mode is None:
+            padding_mode = PaddingMode(wcfg.default_padding_mode)
+        if inpaint is None:
+            inpaint = InpaintMethod(wcfg.default_inpaint)
+        if inpaint_iter is None:
+            inpaint_iter = wcfg.default_inpaint_iter_backward
+
         is_batch = uv_img.ndim == 4
         if not is_batch:
             uv_img = uv_img.unsqueeze(0)

@@ -14,6 +14,13 @@ try:
 except ImportError:
     SCIPY_AVAILABLE = False
 
+from .config import get_config
+
+_INPAINT_METHOD_MAP = {
+    "TELEA": cv2.INPAINT_TELEA,
+    "NS": cv2.INPAINT_NS,
+}
+
 
 def load_c2p_numpy(
     map_file_path: str,
@@ -141,11 +148,13 @@ def interpolate_c2p_array(
     proj_y_map[iy_v, ix_v] = proj_y[valid].astype(np.float32, copy=False)
 
     # Solve for each channel
+    c2p_cfg = get_config().interpolate_c2p
+    cv_method = _INPAINT_METHOD_MAP.get(c2p_cfg.inpaint_method, cv2.INPAINT_TELEA)
     proj_x_filled = _inpaint_fill_float32(
-        proj_x_map, radius=3.0, method=cv2.INPAINT_TELEA
+        proj_x_map, radius=c2p_cfg.inpaint_radius, method=cv_method
     )
     proj_y_filled = _inpaint_fill_float32(
-        proj_y_map, radius=3.0, method=cv2.INPAINT_TELEA
+        proj_y_map, radius=c2p_cfg.inpaint_radius, method=cv_method
     )
 
     # Build output as (N,4) float32
@@ -348,7 +357,8 @@ def main(argv: list[str] | None = None) -> None:
         cam_height = int(argv[2])
         cam_width = int(argv[3])
         c2p_numpy_filename = str(argv[1])
-        method = "inpaint"
+        c2p_cfg = get_config().interpolate_c2p
+        method = c2p_cfg.default_method
         if len(argv) >= 5:
             method = str(argv[4]).lower()
     except ValueError:
@@ -408,12 +418,14 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     csv_filename = f"result_c2p_compensated_{method}.csv"
+    precision = get_config().interpolate_c2p.csv_precision
     with open(csv_filename, "w", encoding="utf-8") as f:
         f.write("cam_x, cam_y, proj_x, proj_y\n")
-        # CSV書き出しは少し重いので、最初の10行と全体のサイズのみ表示など簡略化も検討可能ですが
-        # オリジナルの動作に合わせて全書き出しします。
         for row in c2p_list_interp:
-            f.write(f"{row[0]:.4f}, {row[1]:.4f}, {row[2]:.4f}, {row[3]:.4f}\n")
+            f.write(
+                f"{row[0]:.{precision}f}, {row[1]:.{precision}f}, "
+                f"{row[2]:.{precision}f}, {row[3]:.{precision}f}\n"
+            )
 
     print(f"output : './{csv_filename}'")
     print()
